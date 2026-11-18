@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>SOFIA DJ</title>
+  <meta name="theme-color" content="#0f0f14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="SOFIA">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" href="icon-512.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo">S</span> SOFIA <small>tu DJ</small></div>
+    <button id="btnSettings" class="icon-btn" aria-label="Ajustes">⚙︎</button>
+  </header>
+
+  <!-- Pantalla de configuración inicial -->
+  <section id="setup" class="panel hidden">
+    <h2>Configura a SOFIA</h2>
+    <p class="hint">Solo se hace una vez. Estas llaves se guardan únicamente en este teléfono.</p>
+    <p class="hint">Redirect URI para tu app de Spotify: <code id="redirectHint"></code></p>
+    <label>Client ID de Spotify
+      <input id="inClientId" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Ej: 3f2a9c1e5b7d4e8a...">
+    </label>
+    <label>Llave de Gemini (Google AI Studio)
+      <input id="inGeminiKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="AIza...">
+    </label>
+    <details>
+      <summary>Opciones avanzadas</summary>
+      <label>Modelo de Gemini
+        <input id="inModel" autocomplete="off" autocapitalize="off" spellcheck="false">
+      </label>
+      <label>Canciones por sesión
+        <input id="inCount" type="number" min="5" max="40">
+      </label>
+    </details>
+    <button id="btnSaveSetup" class="primary">Guardar</button>
+    <div id="spotifyBox" class="spotify-box">
+      <p id="spotifyStatus" class="hint">Spotify: no conectado</p>
+      <button id="btnLogin" class="spotify">Conectar con Spotify</button>
+      <button id="btnLogout" class="ghost hidden">Desconectar Spotify</button>
+      <details>
+        <summary>Código de conexión (si Spotify se abrió en otra ventana)</summary>
+        <p class="hint">Si al conectar Spotify terminaste en Safari y no en SOFIA: en esa ventana toca "Mostrar código", cópialo, y pégalo aquí en SOFIA con "Usar código".</p>
+        <input id="inTransfer" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Código de conexión">
+        <button id="btnShowCode" class="ghost">Mostrar código</button>
+        <button id="btnUseCode" class="ghost">Usar código</button>
+      </details>
+      <button id="btnForget" class="ghost">Borrar la memoria de SOFIA</button>
+    </div>
+  </section>
+
+  <!-- Chat -->
+  <main id="chat" class="chat">
+    <div id="messages" class="messages" aria-live="polite"></div>
+    <div class="chips" id="chips">
+      <button data-q="Ponme música que me guste, de mis artistas y parecidos">Mis gustos</button>
+      <button data-q="Sorpréndeme con música que nunca haya escuchado pero que encaje con mis gustos">Descubrir</button>
+      <button data-q="Ponme lo que está de moda ahora mismo y que me pueda gustar">De moda</button>
+      <button data-q="Quiero conocer un género nuevo para mí, que tenga algo de lo que me gusta">Género nuevo</button>
+      <button data-q="Música para motivarme">Motivación</button>
+      <button data-q="Música relajante">Relajante</button>
+      <button data-q="Ponme clásicos antiguos de los géneros que escucho">Viejitas</button>
+    </div>
+  </main>
+
+  <!-- Reproductor -->
+  <section id="player" class="player">
+    <img id="npArt" alt="" class="art">
+    <div class="np">
+      <div id="npTitle" class="np-title">Nada sonando</div>
+      <div id="npArtist" class="np-artist">Abre Spotify y pídele algo a SOFIA</div>
+    </div>
+    <div class="controls">
+      <button id="btnDislike" class="icon-btn" aria-label="No me gustó">👎</button>
+      <button id="btnPrev" class="icon-btn" aria-label="Anterior">⏮</button>
+      <button id="btnPlay" class="icon-btn big" aria-label="Reproducir o pausar">⏯</button>
+      <button id="btnNext" class="icon-btn" aria-label="Siguiente">⏭</button>
+      <button id="btnLove" class="icon-btn" aria-label="Me encantó, guardar en favoritos">❤️</button>
+    </div>
+  </section>
+
+  <form id="composer" class="composer">
+    <button type="button" id="btnMic" class="icon-btn" aria-label="Hablar">🎤</button>
+    <input id="inMsg" placeholder="Sofia, ponme..." autocomplete="off">
+    <button type="submit" class="primary send" aria-label="Enviar">➤</button>
+  </form>
+
+  <script src="app.js"></script>
+</body>
+</html>
