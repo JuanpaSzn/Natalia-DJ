@@ -9,8 +9,8 @@ const SCOPES = [
   'user-read-playback-state', 'user-modify-playback-state', 'user-read-currently-playing',
   'playlist-modify-private', 'playlist-modify-public',
 ].join(' ');
-const DEFAULT_MODEL = 'gemini-flash-latest';
-const DEFAULT_COUNT = 20;
+const DEFAULT_MODEL = 'gemini-flash-lite-latest';
+const DEFAULT_COUNT = 15;
 const REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
 
 const store = {
@@ -27,7 +27,7 @@ const store = {
 const settings = () => ({
   clientId: store.get('clientId', ''),
   geminiKey: store.get('geminiKey', ''),
-  model: store.get('model', DEFAULT_MODEL) || DEFAULT_MODEL,
+  model: (store.get('model', DEFAULT_MODEL) || DEFAULT_MODEL).replace(/^gemini-flash-latest$/, DEFAULT_MODEL),
   count: Number(store.get('count', DEFAULT_COUNT)) || DEFAULT_COUNT,
 });
 
@@ -224,7 +224,7 @@ function buildPrompt(userText, profile) {
     '',
     `Responde SOLO con un objeto JSON, sin texto antes ni después, con esta forma exacta:`,
     `{"mensaje": "lo que le dices a Alexis, 1 a 3 frases, cálido y con onda de DJ", "nombre_sesion": "nombre corto de la sesión", "canciones": [{"artista": "Nombre", "titulo": "Título"}]}`,
-    `Incluye ${count} canciones reales que existan en Spotify si el pedido es de música. Si solo está conversando, "canciones" va vacío.`,
+    `Incluye ${Math.min(count, 15)} canciones reales que existan en Spotify si el pedido es de música. Si solo está conversando, "canciones" va vacío.`,
   ];
   return lines.join('\n');
 }
@@ -245,7 +245,7 @@ function extractJson(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function gemini(prompt, useSearch, model) {
+async function gemini(prompt, useSearch, model, signal) {
   const { geminiKey } = settings();
   const body = {
     systemInstruction: { parts: [{ text: SYSTEM }] },
@@ -258,6 +258,7 @@ async function gemini(prompt, useSearch, model) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': geminiKey },
     body: JSON.stringify(body),
+    signal,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -270,27 +271,34 @@ async function gemini(prompt, useSearch, model) {
 }
 
 // Si un modelo está saturado, probamos otros modelos gratis antes de rendirnos.
-const FALLBACK_MODELS = ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-2.5-flash-lite', 'gemini-2.5-flash'];
+const FALLBACK_MODELS = ['gemini-flash-lite-latest', 'gemini-2.5-flash-lite', 'gemini-flash-latest'];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const isKeyError = (e) => e.status === 401 || e.status === 403 || (e.status === 400 && /api key|API_KEY/i.test(e.message));
+
+// La IA tiene máximo AI_DEADLINE_MS para responder; si no, SOFIA usa el plan B y la música arranca ya.
+const AI_DEADLINE_MS = 6000;
 
 async function askDJ(userText, onStatus) {
   const profile = store.get('profile', null) || await loadProfile(false);
   const prompt = buildPrompt(userText, profile);
-  const models = [...new Set([settings().model, ...FALLBACK_MODELS].filter(Boolean))];
-  const wantsTrends = TREND_WORDS.test(userText);
-  let attempt = 0;
+  const chosen = settings().model;
+  const models = [...new Set([...(chosen && chosen !== DEFAULT_MODEL ? [chosen] : []), ...FALLBACK_MODELS])];
+  const deadline = Date.now() + AI_DEADLINE_MS;
+  let useSearch = TREND_WORDS.test(userText);
   for (const model of models) {
-    const modes = wantsTrends ? [true, false] : [false];
-    for (const useSearch of modes) {
-      try {
-        return await gemini(prompt, useSearch, model);
-      } catch (e) {
-        if (isKeyError(e)) throw e;
-        attempt += 1;
-        if (onStatus) onStatus('La IA está ocupada, probando otra opción…');
-        await wait(Math.min(800 * attempt, 2500));
-      }
+    const remaining = deadline - Date.now();
+    if (remaining < 1200) break;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), remaining);
+    try {
+      return await gemini(prompt, useSearch, model, ctrl.signal);
+    } catch (e) {
+      if (isKeyError(e)) throw e;
+      if (e.name === 'AbortError') break; // se acabó el tiempo: plan B
+      useSearch = false; // la búsqueda web es lo más lento; el siguiente intento va sin ella
+      if (onStatus) onStatus('La IA está ocupada, probando otra opción…');
+    } finally {
+      clearTimeout(timer);
     }
   }
   return { fallback: true };
@@ -360,7 +368,7 @@ async function findTrack(song) {
 async function resolveSongs(songs) {
   const out = [];
   const queue = songs.slice();
-  const workers = Array.from({ length: 4 }, async () => {
+  const workers = Array.from({ length: 8 }, async () => {
     while (queue.length) {
       const song = queue.shift();
       const idx = songs.indexOf(song);
