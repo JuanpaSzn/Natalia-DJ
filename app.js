@@ -548,18 +548,30 @@ function knownArtist(name) {
   return bestSim >= 0.8 ? best : null;
 }
 
-// Canciones de un artista SIN usar la búsqueda: sus álbumes más recientes (otro cupo de Spotify).
-async function artistTracksById(a, { deep } = {}) {
-  let albums = cacheGet('b', 'al:' + a.id, 7 * 24 * 3600 * 1000);
-  if (!albums) {
-    const r = await sp(`/artists/${a.id}/albums`, { query: { include_groups: 'album,single', limit: 10 } });
-    albums = ((r && r.items) || []).filter(Boolean).map((x) => ({ id: x.id, type: x.album_type, date: x.release_date || '', img: ((x.images || [])[x.images.length - 1] || {}).url || '' }));
-    cachePut('b', 'al:' + a.id, albums);
-  }
+// Canciones de un artista SIN usar la búsqueda: sus álbumes (otro cupo de Spotify).
+// years: [desde, hasta] para quedarme solo con álbumes de esos años; pages: cuántas páginas de álbumes leer.
+async function artistTracksById(a, { deep, years, pages = 1, picks = 2 } = {}) {
+  const pgs = await Promise.all(Array.from({ length: pages }, async (_, pg) => {
+    const key = 'al:' + a.id + (pg ? ':' + pg : '');
+    let al = cacheGet('b', key, 7 * 24 * 3600 * 1000);
+    if (!al) {
+      const r = await sp(`/artists/${a.id}/albums`, { query: { include_groups: 'album,single', limit: 10, ...(pg ? { offset: pg * 10 } : {}) } });
+      al = ((r && r.items) || []).filter(Boolean).map((x) => ({ id: x.id, type: x.album_type, date: x.release_date || '', img: ((x.images || [])[x.images.length - 1] || {}).url || '' }));
+      cachePut('b', key, al);
+    }
+    return al;
+  }));
+  const albums = pgs.flat();
   const sorted = albums.slice().sort((x, y) => (y.date > x.date ? 1 : -1));
   const full = sorted.filter((x) => x.type === 'album');
-  const pick = deep ? shuffle(full.length ? full : sorted).slice(0, 2)
-    : [...new Set([sorted[0], full[0], shuffle(sorted)[0]].filter(Boolean))].slice(0, 2);
+  let pick;
+  if (years) {
+    const inRange = sorted.filter((x) => { const y = Number(String(x.date).slice(0, 4)); return y >= years[0] && y <= years[1]; });
+    pick = shuffle(inRange).slice(0, picks);
+  } else {
+    pick = deep ? shuffle(full.length ? full : sorted).slice(0, picks)
+      : [...new Set([sorted[0], full[0], shuffle(sorted)[0]].filter(Boolean))].slice(0, picks);
+  }
   const lists = await Promise.all(pick.map(async (al) => {
     const hit = cacheGet('b', 'tr:' + al.id, 30 * 24 * 3600 * 1000);
     if (hit) return hit;
@@ -1088,6 +1100,112 @@ async function playlistSession(query, profile) {
   } catch { return null; }
 }
 
+
+// ---------- Botones de Natalia: listas hechas con IDs reales de Spotify (funcionan SIN búsqueda) ----------
+const AR = (name, id) => ({ name, id });
+const PRESET_ARTISTS = {
+  blessd: AR('Blessd', '1TA5sGRlKUJXBN4ZyJuDIX'), ryan: AR('Ryan Castro', '7j6DKwmjbxvpQO8h914uEz'),
+  feid: AR('Feid', '2LRoIwlKmHjgvigdNGBHNo'), beele: AR('Beéle', '7a0XAaPaK2aDSqa8p3QnC7'), anuel: AR('Anuel AA', '2R21vXR83lH98kGeO99Y66'),
+  lddt: AR('Los Dos de Tamaulipas', '77Zc5MMUIMJriEDAcaDspi'), fuerza: AR('Fuerza Regida', '0ys2OFYzWYB5hRDLCsBqxt'),
+  luisr: AR('Luis R Conriquez', '0pePYDrJGk8gqMRbXrLJC8'), marca: AR('Marca Registrada', '3dTptwlJ36kflO4WTFZqF9'),
+  gmarca: AR('Grupo Marca Registrada', '1gW6pz5n1aK249L0GvfQCC'),
+  drake: AR('Drake', '3TVXtAsR1Inumwj472S9r4'), savage: AR('21 Savage', '1URnnhqYAYcrqrcwql10ft'), future: AR('Future', '1RyvyyTE3xzB2ZywiAwp0i'),
+  travis: AR('Travis Scott', '0Y5tJX1MQlPlqiwlOH1tJY'), lilbaby: AR('Lil Baby', '5f7VJjfbwm532GiveGC0ZK'), toliver: AR('Don Toliver', '4Gso3d4CscCijv0lmajZWs'),
+  roddy: AR('Roddy Ricch', '757aE44tKEUQEqRuT6GnEB'), metro: AR('Metro Boomin', '0iEtIxbK0KxaSlF7G42ZOp'), cole: AR('J. Cole', '6l3HvQ5sa6mXTsMTB19rO5'),
+};
+const US_RAP_POOL = [
+  AR('Gunna', '2hlmm7s2ICUX0LVIhVFlZQ'), AR('Playboi Carti', '699OTQXzgjhIYAHMy9RyPD'), AR('Lil Durk', '3hcs9uc56yIGFCSy9leWe7'),
+  AR('Polo G', '6AgTAQt8XS6jRWi4sX7w49'), AR('Young Thug', '50co4Is1HCEo8bhOyUWKpn'), AR('A$AP Rocky', '13ubrt8QOOCPljQ2FL1Kca'),
+  AR('Tyler, The Creator', '4V8LLVI7PbaPR0K2TGSxFF'), AR('Baby Keem', '5SXuuuRpukkTvsLuUknva1'), AR('GloRilla', '2qoQgPAilErOKCwE2Y8wOG'),
+  AR('Doechii', '4E2rKHVDssGJm2SCDOMMJB'), AR('Pop Smoke', '0eDvMgVFoNV3TpwtrVCoTj'), AR('Mac Miller', '4LLpKhyESsyAXpc4laK94U'),
+  AR('Yeat', '3qiHUAX7zY4Qnjx8TNUzVx'), AR('Lil Yachty', '6icQOAFXDZKsumw3YXyusw'), AR('Lil Uzi Vert', '4O15NlyKLIASxsJ0PrXPfz'),
+  AR('XXXTENTACION', '15UsOTVnJzReFVN1VCnxy4'), AR('King Von', '6QtgPSJPSzcnn7dPZ4VINp'), AR('DaBaby', '4r63FhuTkUYltbVAg5TQnk'),
+  AR('Kendrick Lamar', '2YZyLoL8N0Wb9xBt1NhZWg'), AR('Juice WRLD', '4MCBfE4596Uoi2O4DtmEMz'),
+  PRESET_ARTISTS.roddy, PRESET_ARTISTS.metro, PRESET_ARTISTS.cole, PRESET_ARTISTS.toliver, PRESET_ARTISTS.lilbaby, PRESET_ARTISTS.savage, PRESET_ARTISTS.future, PRESET_ARTISTS.travis,
+];
+// Éxitos de todos los tiempos (canciones con su ID real de Spotify).
+const GLOBAL_HITS = [
+  ['32OlwWuMpZ6b0aN2RZOeMS', 'Uptown Funk (feat. Bruno Mars)', 'Mark Ronson'], ['60nZcImufyMA1MKQY3dcCH', 'Happy', 'Pharrell Williams'],
+  ['1hGy2eLcmC8eKx7qr1tOqx', 'Beautiful Girls', 'Sean Kingston'], ['7qiZfU4dY1lWllzX7mPBI3', 'Shape of You', 'Ed Sheeran'],
+  ['1c8gk2PeTE04A1pIDH9YMk', 'Rolling in the Deep', 'Adele'], ['0F7FA14euOIX8KcbEturGH', 'Old Town Road', 'Lil Nas X'],
+  ['39LLxExYz6ewLAcYrzQQyP', 'Levitating', 'Dua Lipa'], ['34gCuhDGsG4bRPIf9bb02f', 'Thinking out Loud', 'Ed Sheeran'],
+  ['1WkMMavIMc4JZ8cfMmxHkI', "Can't Stop the Feeling!", 'Justin Timberlake'], ['4JehYebiI9JE8sR8MisGVb', 'Halo', 'Beyoncé'],
+  ['4Dvkj6JhhA12EX05fT7y2e', 'As It Was', 'Harry Styles'], ['3w3y8KPTfNeOKPiqUTakBh', 'Locked out of Heaven', 'Bruno Mars'],
+  ['5HCyWlXZPP0y6Gqq8TgA20', 'STAY (with Justin Bieber)', 'The Kid LAROI'], ['3PfIrDoz19wz7qK7tYeu62', "Don't Start Now", 'Dua Lipa'],
+  ['5IVuqXILoxVWvWEPm82Jxr', 'Crazy In Love', 'Beyoncé'], ['2xLMifQCjDGFmkHkpNLD9h', 'SICKO MODE', 'Travis Scott'],
+  ['7BqBn9nzAq8spo5e7cZ0dJ', 'Just the Way You Are', 'Bruno Mars'], ['3d0WouFnFmr0K3kjeza3fF', "Hips Don't Lie", 'Shakira'],
+  ['6I9VzXrHxO9rA9A5euc8Ak', 'Toxic', 'Britney Spears'], ['0lHAMNU8RGiIObScrsRgmP', 'Titanium (feat. Sia)', 'David Guetta'],
+  ['2XU0oxnq2qxCpomAAuJY8K', 'Dance Monkey', 'Tones And I'],
+].map(([id, name, artist]) => ({ uri: 'spotify:track:' + id, id, name, artistIds: [], artists: [artist], year: 0, img: '' }));
+
+const PRESETS = [
+  { id: 'larose', re: /\bla rose\b.*\bsimilares\b/ },
+  { id: 'corridos', re: /corridos de los dos de tamaulipas/ },
+  { id: 'drake', re: /\bdrake\b.*\bsimilares\b/ },
+  { id: 'usrap', re: /artistas americanos/ },
+  { id: 'hits', re: /exitos mas famosos del mundo/ },
+];
+
+// Saca canciones de varios artistas por sus álbumes y las mezcla (sin buscar).
+async function presetMix(specs, profile) {
+  const picks = budgetLeft() >= 10 ? 2 : 1; // pocas llamadas: Spotify nos limita
+  const res = await Promise.allSettled(specs.map(async (sp_) =>
+    shuffle(await artistTracksById(sp_.artist, { years: sp_.years, pages: sp_.years ? 2 : 1, picks, deep: !!sp_.deep })).slice(0, sp_.take || 8)));
+  const lists = res.map((r) => (r.status === 'fulfilled' ? r.value : []));
+  // Si Spotify frenó a medias pero ya tengo suficiente, sigo con lo que hay; si no, que reintente.
+  const failed = res.find((r) => r.status === 'rejected' && r.reason && r.reason.status === 429);
+  if (failed && lists.flat().length < 8) throw failed.reason;
+  return lists;
+}
+
+async function presetSession(p, profile) {
+  const count = settings().count;
+  const A = PRESET_ARTISTS;
+  const avoid = avoidFor(profile, false, 200);
+  if (p.id === 'hits') {
+    const tracks = shuffle(GLOBAL_HITS).filter((t) => !avoid.uris.has(t.uri)).slice(0, count);
+    return { tracks: tracks.length >= 8 ? tracks : shuffle(GLOBAL_HITS).slice(0, count), key: '', label: 'éxitos globales', intro: 'Los éxitos más famosos del mundo y de Estados Unidos, de siempre: Uptown Funk, Happy, Beautiful Girls y más.' };
+  }
+  if (p.id === 'larose') {
+    let rose = knownArtist('La Rose');
+    if (!rose && !searchBlocked()) { const f = await findArtist('La Rose').catch(() => null); if (f && f.id && (f.exact || f.sim >= 0.8)) rose = f; }
+    const similar = shuffle([A.blessd, A.ryan, A.feid, A.beele, A.anuel]).slice(0, rose ? 2 : 3);
+    const specs = [...(rose ? [{ artist: rose, take: 10 }] : []), ...similar.map((a) => ({ artist: a, take: 7 }))];
+    const groups = await presetMix(specs, profile);
+    const tracks = arrange(groups, count, avoid);
+    return { tracks, key: 'reguetón', label: 'La Rose y similares', intro: `${rose ? 'La Rose' : 'Reguetón parecido a La Rose'} y artistas parecidos (${similar.map((a) => a.name).join(', ')}), todo reguetón.` };
+  }
+  if (p.id === 'corridos') {
+    const pool = shuffle([
+      { artist: A.lddt, take: 9 },
+      { artist: A.fuerza, years: [2023, 2023], take: 9 },
+      { artist: A.luisr, years: [2023, 2023], take: 9 },
+      { artist: A.marca, take: 9 }, { artist: A.gmarca, take: 9 },
+    ]).slice(0, 3);
+    const groups = await presetMix(pool, profile);
+    const tracks = arrange(groups, count, avoid);
+    return { tracks, key: 'corridos tumbados', label: 'corridos', intro: 'Corridos y regional: Los Dos de Tamaulipas, Fuerza Regida y Luis R Conriquez (de 2023) y Marca Registrada.' };
+  }
+  if (p.id === 'drake') {
+    const similar = shuffle([A.savage, A.future, A.travis, A.lilbaby, A.toliver, A.roddy, A.metro, A.cole]).slice(0, 2);
+    const groups = await presetMix([{ artist: A.drake, take: 12 }, ...similar.map((a) => ({ artist: a, take: 7 }))], profile);
+    const tracks = arrange(groups, count, avoid);
+    return { tracks, key: 'rap', label: 'Drake y similares', intro: `Drake y artistas parecidos (${similar.map((a) => a.name).join(' y ')}), todo rap y trap.` };
+  }
+  // usrap: artistas americanos que no escuchas, sin repetir los de la vez anterior.
+  const m = memory();
+  const mine = new Set(profile.artists.map((a) => a.id));
+  const used = new Set((m.usrap || []).slice(-14));
+  const fresh = US_RAP_POOL.filter((a) => !mine.has(a.id) && !used.has(a.id));
+  const chosen = shuffle(fresh.length >= 3 ? fresh : US_RAP_POOL.filter((a) => !mine.has(a.id))).slice(0, 3);
+  m.usrap = [...(m.usrap || []), ...chosen.map((a) => a.id)].slice(-30);
+  saveMemory(m);
+  const groups = await presetMix(chosen.map((a) => ({ artist: a, deep: true, take: 9 })), profile);
+  const strict = avoidFor(profile, true);
+  const tracks = arrange(groups, count, strict);
+  return { tracks: tracks.length >= 5 ? tracks : arrange(groups, count, avoid), key: 'rap', label: 'artistas americanos nuevos', intro: `Artistas americanos de trap y rap que quizá no conoces: ${chosen.map((a) => a.name).join(', ')}. Si te gusta uno, dale ❤.` };
+}
+
 // Arma la sesión. Siempre UN solo género, para que todo fluya.
 async function buildSession(text, extra) {
   await waitPause(5000);
@@ -1096,6 +1214,10 @@ async function buildSession(text, extra) {
   let profile = store.get('profile2', null);
   if (!profile || !profile.aliasOf) profile = await loadProfile(true);
   const count = settings().count;
+
+  // Botones de Natalia con listas propias (sin búsqueda).
+  const preset = PRESETS.find((p) => p.re.test(norm(text)));
+  if (preset) return presetSession(preset, profile);
 
   // País: lo que más suena allá ahora.
   if (country && (mode.country || !artistQuery)) {
@@ -1489,7 +1611,7 @@ async function handleRequest(text, retryOf) {
   if (retryOf) extra = { ...retryOf, retry: true };
   const FOLLOW = /^(y )?(pon(me)? |dame |quiero |echale )?(mas|otras?|otros?|sigue|seguir|continua|lo mismo|igual|otra tanda|mas canciones|mas temas|mas de eso|mas asi)( (de )?(eso|esas?|esos?|asi|parecid\w*|igual\w*|similares?|canciones|temas|del mismo|de lo mismo|estilo))*$/;
   const TWEAK = /^(y |pero |ahora )?(pon(me)? |dame )?(mas |las |unas |solo )?(nuev|recient|viej|antigu|clasic|popular|famos|pegad|menos|joyit|rarez|tranquil|suave)\w*( \w+){0,3}$/;
-  if (last && FOLLOW.test(t)) { request = last.key && aliasByLabel(last.key) && !interpret(last.text).genre && !interpret(last.text).artistQuery ? last.key : last.text; extra = { more: true }; }
+  if (last && FOLLOW.test(t)) { request = !PRESETS.some((p) => p.re.test(norm(last.text))) && last.key && aliasByLabel(last.key) && !interpret(last.text).genre && !interpret(last.text).artistQuery ? last.key : last.text; extra = { more: true }; }
   else if (last && TWEAK.test(t) && !interpret(t).artistQuery && !interpret(t).genre) { request = last.text + ' ' + t; extra = { more: true }; }
   const thinking = addMessage('sofia thinking', 'Armando tu sesión…');
   try {
@@ -1693,7 +1815,7 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v13 · 18 nov';
+const VERSION = 'v14 · 18 nov';
 
 // Modo diagnóstico: toca 5 veces el logo "N" y Natalia muestra cada llamada que hizo a Spotify.
 function showDiagnostics() {
