@@ -10,7 +10,8 @@ const SCOPES = [
   'playlist-modify-private', 'playlist-modify-public',
 ].join(' ');
 const DEFAULT_COUNT = 25;
-const REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
+// Dirección fija de Natalia (siempre igual, aunque abras la app desde otro enlace o desde index.html).
+const REDIRECT_URI = location.hostname === 'juanpaszn.github.io' ? 'https://juanpaszn.github.io/Natalia-DJ/' : location.origin + location.pathname.replace(/index\.html$/, '');
 
 const DEFAULT_CLIENT_ID = '14ae18a9acca4246a56e7331a962edd5';
 const store = {
@@ -95,7 +96,8 @@ async function login() {
     code_challenge_method: 'S256', code_challenge: challenge,
     redirect_uri: REDIRECT_URI, state,
   });
-  location.href = 'https://accounts.spotify.com/authorize?' + params;
+  addMessage('sofia', `Conectando… Spotify debe tener EXACTAMENTE esta Redirect URI:\n${REDIRECT_URI}`);
+  setTimeout(() => { location.href = 'https://accounts.spotify.com/authorize?' + params; }, 1200);
 }
 
 async function tokenRequest(body) {
@@ -211,6 +213,7 @@ async function spRaw(path, { method = 'GET', body, query } = {}, retried = false
       const mins = reason === 'QUOTA_EXCEEDED' ? 60 : recent >= 2 ? 15 : 0;
       searchBlockedUntil = Math.max(searchBlockedUntil, Date.now() + (mins ? mins * 60000 : secs * 1000));
       store.set('searchBlockedUntil', searchBlockedUntil);
+      store.set('searchBlockInfo', { at: Date.now(), reason: reason || '(sin motivo)', secs, client: String(settings().clientId).slice(-4), ver: VERSION });
     } else {
       pausedUntil = Math.max(pausedUntil, Date.now() + secs * 1000);
       limitGuess = Math.max(5, Math.min(limitGuess, callsSince(30000) - 1));
@@ -1681,11 +1684,16 @@ function setupSettings() {
       await loadProfile(true);
     } catch (e) { addMessage('error', 'Ese código no funcionó: ' + e.message); }
   };
+  $('btnResetBlock').onclick = () => {
+    ['searchBlockedUntil', 'searchBlockInfo', 'apilog'].forEach((k) => store.del(k));
+    searchBlockedUntil = 0; pausedUntil = 0; apiLog.length = 0;
+    addMessage('sofia', `Reinicié el bloqueo y la pausa. Voy a probar la búsqueda de verdad con el Client ID …${String(settings().clientId).slice(-4)}. Pídeme algo.`);
+  };
   $('btnForget').onclick = () => { store.del('memory'); store.del('chat'); addMessage('sofia', 'Borré mi memoria de valoraciones y canciones sugeridas.'); };
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v12 · 18 nov';
+const VERSION = 'v13 · 18 nov';
 
 // Modo diagnóstico: toca 5 veces el logo "N" y Natalia muestra cada llamada que hizo a Spotify.
 function showDiagnostics() {
@@ -1695,6 +1703,8 @@ function showDiagnostics() {
   const text = `Diagnóstico Natalia ${VERSION}\n` +
     `Llamadas a Spotify: ${callsSince(30000)} en 30 s · ${callsSince(60000)} en 1 min · ${callsSince(600000)} en 10 min\n` +
     `Pausas pedidas por Spotify (429) en 10 min: ${n429}${pausedUntil > Date.now() ? ` · en pausa ${Math.ceil((pausedUntil - Date.now()) / 1000)} s más` : ''}\n` +
+    `Client ID en uso: …${String(settings().clientId).slice(-4)} · Redirect: ${REDIRECT_URI}\n` +
+    `Bloqueo: ${(() => { const i = store.get('searchBlockInfo', null); return i ? `lo puso Spotify a las ${hhmmss(i.at)} (motivo: ${i.reason}, Client …${i.client}, ${i.ver})` : searchBlocked() ? 'guardado de antes (no lo puso esta versión)' : 'ninguno'; })()}\n` +
     `Búsquedas: ${searchBlocked() ? `bloqueadas por Spotify ${Math.ceil((searchBlockedUntil - Date.now()) / 60000)} min más (uso otros caminos)` : 'funcionando'}\n\n` +
     last.map((x) => `${hhmmss(x.t)} ${x.s}${x.r ? ' ' + x.r : ''} ${x.m} ${x.p}${x.ra ? ' espera ' + x.ra + 's' : ''} ${x.ms}ms ${x.v && x.v !== VERSION ? '(' + x.v + ')' : ''}`).join('\n');
   const b = addMessage('sofia', text);
@@ -1715,7 +1725,7 @@ function setupDiagnostics() {
 }
 async function init() {
   setupDiagnostics();
-  const v = document.getElementById('version'); if (v) v.textContent = VERSION;
+  const v = document.getElementById('version'); if (v) v.textContent = `${VERSION} · …${String(settings().clientId).slice(-4)}`;
   setupSettings();
   setupPlayer();
   setupMic();
