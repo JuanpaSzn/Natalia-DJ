@@ -183,8 +183,7 @@ async function spRaw(path, { method = 'GET', body, query } = {}, retried = false
   }
   if (res.status === 429) {
     const secs = Number(res.headers.get('Retry-After')) || 3;
-    pausedUntil = Math.max(pausedUntil, Date.now() + secs * 1000);
-    if (secs <= 6 && waits < 2) {
+    if (secs <= 3 && waits < 1) {
       await new Promise((r) => setTimeout(r, secs * 1000));
       return spRaw(path, { method, body, query }, retried, waits + 1);
     }
@@ -251,8 +250,6 @@ async function loadProfile(force, silent) {
     const sum = tasteSummary(profile);
     addMessage('sofia', sum ? `Ya leí tus gustos. Lo que más escuchas:\n${sum}\n\n¿Qué te pongo?` : 'Ya estoy conectada, pero Spotify casi no me dio datos de lo que escuchas. Pídeme algo y voy aprendiendo con tus ❤.');
   }
-  // En segundo plano: averiguo el género de tus artistas que aún no conozco.
-  probeUnknownArtists(profile).catch(() => {});
   return profile;
 }
 
@@ -748,8 +745,7 @@ async function genreSession(alias, mode, profile, { market, newGenre } = {}) {
   const known = new Set(profile.artists.map((a) => a.id));
   const base = discover ? 10 + rnd(4) * 10 : rnd(3) * 10;
   const [g1, g2] = alias.genres;
-  const qs = [[`genre:"${g1}"${yf}`, base], [`genre:"${g1}"${yf}`, base + 10], [`genre:"${g1}"${yf}`, base + 20]];
-  if (g2) qs.push([`genre:"${g2}"${yf}`, base]);
+  const qs = [[`genre:"${g1}"${yf}`, base], [`genre:"${g1}"${yf}`, base + 10]];
   // Artistas de ese género (los tuyos y los conocidos) para que nunca quede corta.
   const favs = Object.values(memory().fav || {}).filter((f) => f.label === alias.label).map((f) => f.name);
   const seedNames = [
@@ -758,7 +754,7 @@ async function genreSession(alias, mode, profile, { market, newGenre } = {}) {
       ...profile.artists.filter((a) => (profile.aliasOf || {})[a.id] === alias.label).slice(0, 6).map((a) => a.name),
       ...shuffle(ARTIST_SEEDS[alias.label] || []).slice(0, 4),
     ]),
-  ].filter((n, i, arr) => arr.indexOf(n) === i).slice(0, 3);
+  ].filter((n, i, arr) => arr.indexOf(n) === i).slice(0, 1);
   const seedQs = seedNames.map((n) => [`artist:"${n}"${yf}`, discover ? 10 : 0]);
   const lists = await gather([...qs, ...seedQs], market);
   if (aliasByLabel(alias.label)) learnAliases(lists.slice(0, qs.length).flat().map((t) => [t.artistIds[0], alias.label]));
@@ -811,15 +807,23 @@ function pickNewGenre(profile) {
 
 async function countrySession(c, mode, profile) {
   const y = new Date().getFullYear();
-  const lists = await gather(c.artists.map((a) => [`artist:"${a}" year:${y - 1}-${y}`, 0]), c.market);
-  const groups = lists.map((l, i) => l.filter((t) => t.artists.some((n) => norm(n) === norm(c.artists[i]))).slice(0, 3));
+  const pick = shuffle(c.artists).slice(0, 4);
+  const lists = await gather(pick.map((a) => [`artist:"${a}" year:${y - 1}-${y}`, 0]), c.market);
+  const groups = lists.map((l, i) => l.filter((t) => t.artists.some((n) => norm(n) === norm(pick[i]))).slice(0, 6));
   return arrange(shuffle(groups), settings().count, avoidFor(profile, false));
 }
 
 async function motivationSession(profile) {
-  const picks = shuffle(MOTIVATION).slice(0, settings().count + 3);
-  const lists = await Promise.all(picks.map(([name, artist]) => searchTracks(`track:"${name}" artist:"${artist}"`, 0)));
-  const tracks = lists.map((l, i) => l.find((t) => t.artists.some((a) => norm(a).includes(norm(picks[i][1])))) || null).filter(Boolean);
+  const known = store.get('motivTracks', {});
+  const missing = shuffle(MOTIVATION.filter(([n]) => !known[n])).slice(0, 6);
+  const lists = await Promise.all(missing.map(([name, artist]) => searchTracks(`track:"${name}" artist:"${artist}"`, 0)));
+  lists.forEach((l, i) => { const t = l.find((x) => x.artists.some((a) => norm(a).includes(norm(missing[i][1])))); if (t) known[missing[i][0]] = t; });
+  store.set('motivTracks', known);
+  let tracks = shuffle(Object.values(known));
+  if (tracks.length < settings().count) {
+    const extra = await gather([['artist:"Eminem"', rnd(2) * 10], [`artist:"${shuffle(['50 Cent', 'DMX', 'Kanye West', 'Kendrick Lamar'])[0]}"`, 0]]);
+    tracks = tracks.concat(shuffle(extra.flat()));
+  }
   const avoid = avoidFor(profile, false);
   avoid.uris = new Set(memory().disliked.map((x) => x.uri));
   return arrange(tracks.map((t) => [t]), settings().count, avoid);
@@ -852,13 +856,13 @@ async function probeArtist(artist, labels) {
 async function artistSession(artist, mode, profile) {
   const count = settings().count;
   const yf = yearFilter(mode);
-  const ownOffs = mode.deep ? [20, 30, 40, 50] : [0, 10, 20];
+  const ownOffs = mode.deep ? [20, 30] : [0, 10];
   const taste = tasteByGenre(profile);
   const guess = Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 3);
   const knownAl = aliasOfArtist(artist, profile.aliasOf);
   const [ownLists, probed] = await Promise.all([
     gather(ownOffs.map((o) => [`artist:"${artist.name}"${mode.fresh ? yf : ''}`, o])),
-    knownAl ? Promise.resolve(knownAl) : probeArtist(artist, guess.length ? guess : ['reguetón', 'trap latino', 'pop latino']),
+    Promise.resolve(knownAl),
   ]);
   const al = knownAl || probed;
   let own = ownLists.flat().filter((t) => t.artistIds.includes(artist.id));
@@ -872,13 +876,13 @@ async function artistSession(artist, mode, profile) {
   // Relacionados: con quién colabora (los "feat") y, si sé su género, más de ese género.
   const collabs = {};
   own.forEach((t) => t.artists.forEach((n, i) => { if (t.artistIds[i] !== artist.id) collabs[n] = (collabs[n] || 0) + 1; }));
-  const collabNames = Object.keys(collabs).sort((a, b) => collabs[b] - collabs[a]).slice(0, 2);
+  const collabNames = Object.keys(collabs).sort((a, b) => collabs[b] - collabs[a]).slice(0, al ? 0 : 1);
   if (!mode.popular && !mode.deep) own = shuffle(own);
   const onlyHim = mode.popular || mode.deep || /\bsolo\b|\bpuro\b|\bpuras?\b|nada mas/.test(mode.raw || '');
   let others = [];
   if (!onlyHim) {
     const qs = collabNames.map((n) => [`artist:"${n}"`, 0]);
-    if (al) qs.push([`genre:"${al.genres[0]}"${yf}`, rnd(2) * 10], [`genre:"${al.genres[0]}"${yf}`, 20]);
+    if (al) qs.push([`genre:"${al.genres[0]}"${yf}`, rnd(2) * 10]);
     const lists = qs.length ? await gather(qs) : [];
     const rel = lists.slice(0, collabNames.length).flat().filter((t) => !t.artistIds.includes(artist.id) && t.artists.some((n) => collabNames.includes(n)));
     const gen = lists.slice(collabNames.length).flat().filter((t) => !t.artistIds.includes(artist.id));
@@ -1006,7 +1010,6 @@ async function buildSession(text, extra) {
 
   // Tus gustos (o descubrir dentro de tus gustos): uno de tus géneros por sesión.
   let alias = pickMyGenre(profile);
-  if (!alias && !profile.probed) { await probeUnknownArtists(profile).catch(() => {}); profile.probed = true; alias = pickMyGenre(profile); }
   if (!alias) {
     const y = new Date().getFullYear();
     const lists = await gather([[`year:${y}`, 0], [`year:${y}`, 10]]);
@@ -1027,59 +1030,17 @@ async function pickDevice() {
   return devices.find((d) => d.is_active) || devices.find((d) => d.type === 'Smartphone') || devices[0];
 }
 
-// Si Spotify no está abierto, SOFIA lo abre sola, espera a que aparezca y pone la cola.
-let pendingUris = null;
-async function waitForDevice(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    try { const d = await pickDevice(); if (d) return d; } catch { /* seguimos esperando */ }
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-  return null;
-}
-async function playOn(device, uris) {
-  if (!device.is_active) {
-    try { await sp('/me/player', { method: 'PUT', body: { device_ids: [device.id], play: false } }); } catch { /* algunos equipos no lo necesitan */ }
-  }
-  await sp('/me/player/play', { method: 'PUT', query: { device_id: device.id }, body: { uris } });
-  pendingUris = null;
-  setTimeout(refreshNowPlaying, 1200);
-}
-function openSpotifyApp(uri) {
-  try { location.href = uri || 'spotify:'; } catch { /* si el teléfono no deja, queda el botón */ }
-}
-async function resumePending() {
-  if (!pendingUris) return;
-  const uris = pendingUris;
-  const device = await waitForDevice(10000);
-  if (device && pendingUris === uris) {
-    try { await playOn(device, uris); addMessage('sofia', '¡Listo, ya está sonando en Spotify!'); }
-    catch (e) { addMessage('error', friendlyError(e)); }
-  }
-}
-
+// Reproducir: una sola orden a Spotify. Si no hay Spotify activo, se usa el que esté en la lista.
 async function playUris(uris) {
   try {
     await sp('/me/player/play', { method: 'PUT', body: { uris } });
-    pendingUris = null;
-    setTimeout(refreshNowPlaying, 1200);
-    return;
   } catch (e) {
-    if (e.status !== 404 && e.status !== 403) throw e;
-    if (e.status === 403 && /premium/i.test(e.message)) throw e;
+    if (e.status !== 404) throw e;
+    const device = await pickDevice().catch(() => null);
+    if (!device) throw new Error('NO_DEVICE');
+    await sp('/me/player/play', { method: 'PUT', query: { device_id: device.id }, body: { uris } });
   }
-  let device = await pickDevice().catch(() => null);
-  if (device) return playOn(device, uris);
-  // Spotify cerrado: lo abro yo con la primera canción y espero a que aparezca.
-  pendingUris = uris;
-  const b = addMessage('sofia', 'Abriendo Spotify para poner tu música… Si te quedas en Spotify, vuelve a SOFIA y arranca sola.');
-  const link = document.createElement('a');
-  link.href = uris[0]; link.textContent = 'Abrir Spotify'; link.className = 'open-spotify';
-  b.appendChild(document.createElement('br')); b.appendChild(link);
-  openSpotifyApp(uris[0]);
-  waitForDevice(20000).then((d) => {
-    if (d && pendingUris === uris) return playOn(d, uris).then(() => addMessage('sofia', '¡Listo, ya está sonando en Spotify!'));
-  }).catch((e) => addMessage('error', friendlyError(e)));
+  setTimeout(refreshNowPlaying, 1500);
 }
 
 async function savePlaylist(name, uris) {
@@ -1378,7 +1339,7 @@ async function handleRequest(text, retryOf) {
     await playing;
   } catch (e) {
     thinking.remove();
-    if (e.status === 429 && !extra.retry && (e.retryAfter || 0) <= 40) {
+    if (e.status === 429 && !extra.retry && (e.retryAfter || 0) <= 10) {
       const secs = Math.ceil(e.retryAfter || 5);
       addMessage('sofia', `Spotify me pidió esperar ${secs} segundos. Lo intento sola en cuanto pase, no hagas nada.`);
       setTimeout(() => handleRequest(request, extra), secs * 1000 + 300);
@@ -1392,6 +1353,8 @@ async function handleRequest(text, retryOf) {
 
 function friendlyError(e) {
   if (e.message === 'NO_LOGIN') return 'Necesito que me conectes a Spotify (Ajustes ⚙︎).';
+  if (e.message === 'NO_DEVICE') return 'Spotify está cerrado. Ábrelo, dale play a cualquier canción y vuelve a pedírmelo: arranca al instante.';
+  if (e.status === 403 && /restriction/i.test(e.message)) return 'Spotify no dejó cambiar la música en este momento. Abre Spotify, dale play a algo y vuelve a pedírmelo.';
   if (e.status === 429) return `Spotify me pidió una pausa${e.retryAfter ? ` de ${Math.ceil(e.retryAfter)} segundos` : ''}. Vuelve a pedírmelo en un momento.`;
   if (e.status === 403 && /premium/i.test(e.message)) return 'Spotify pide Premium para controlar la reproducción.';
   if (e.status === 403) return 'Spotify no me dejó (403: ' + e.message + '). Revisa en Spotify for Developers que tu correo esté en "User Management" de tu app.';
@@ -1471,8 +1434,8 @@ function setupPlayer() {
   });
   $('btnLove').onclick = act(() => rate(true));
   $('btnDislike').onclick = act(() => rate(false));
-  setInterval(() => { if (!busy) refreshNowPlaying(); }, 15000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshNowPlaying(); resumePending(); } });
+  setInterval(() => { if (!busy) refreshNowPlaying(); }, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !busy) refreshNowPlaying(); });
 }
 
 // ---------- Ajustes ----------
@@ -1521,7 +1484,7 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v8 · 18 nov';
+const VERSION = 'v9 · 18 nov';
 async function init() {
   const v = document.getElementById('version'); if (v) v.textContent = VERSION;
   setupSettings();
