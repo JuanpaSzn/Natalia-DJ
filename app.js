@@ -138,55 +138,62 @@ async function getAccessToken() {
   return fresh.access;
 }
 
-// Máximo 3 peticiones a la vez a Spotify, y las búsquedas repetidas salen de memoria (10 min).
+// Máximo 3 peticiones a la vez a Spotify. Si Spotify pide pausa, no se le insiste.
 let inFlight = 0;
 const waiting = [];
 let pausedUntil = 0;
-const searchCache = new Map();
 async function slot() {
   if (inFlight >= 3) await new Promise((r) => waiting.push(r));
   inFlight++;
-  const wait = pausedUntil - Date.now();
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 }
 function release() { inFlight--; const next = waiting.shift(); if (next) next(); }
 
-async function sp(path, opts = {}, retried = false, waits = 0) {
-  const isSearch = path === '/search' && (!opts.method || opts.method === 'GET');
-  const key = isSearch ? JSON.stringify(opts.query) : '';
-  if (isSearch) {
-    const hit = searchCache.get(key);
-    if (hit && Date.now() - hit.at < 600000) return hit.data;
+// Registro de cada llamada a Spotify (para el modo diagnóstico: toca 5 veces el logo "S").
+const apiLog = store.get('apilog', []);
+let apiLogDirty = false;
+function logCall(method, path, query, status, retryAfter, ms) {
+  apiLog.push({ t: Date.now(), m: method, p: path + (query && query.q ? ' ' + String(query.q).slice(0, 40) : '') + (query && query.offset ? ' @' + query.offset : ''), s: status, ra: retryAfter || 0, ms, v: VERSION });
+  if (apiLog.length > 300) apiLog.splice(0, apiLog.length - 300);
+  if (!apiLogDirty) { apiLogDirty = true; setTimeout(() => { apiLogDirty = false; store.set('apilog', apiLog); }, 2000); }
+}
+const callsSince = (ms) => apiLog.filter((x) => x.t > Date.now() - ms).length;
+// SOFIA aprende cuántas llamadas aguanta Spotify en 30 s y nunca se pasa (deja 2 libres para reproducir).
+let limitGuess = Number(store.get('limitGuess', 12)) || 12;
+function growLimit() {
+  const recent429 = apiLog.some((x) => x.s === 429 && x.t > Date.now() - 30 * 60000);
+  if (!recent429 && limitGuess < 25 && Math.random() < 0.25) { limitGuess++; store.set('limitGuess', limitGuess); }
+}
+const budgetLeft = () => limitGuess - 2 - callsSince(30000);
+
+async function sp(path, opts = {}, retried = false) {
+  const left = pausedUntil - Date.now();
+  if (left > 0) {
+    const e = new Error('Spotify pidió una pausa'); e.status = 429; e.retryAfter = Math.ceil(left / 1000); throw e;
   }
   await slot();
-  let data;
-  try { data = await spRaw(path, opts, retried, waits); } finally { release(); }
-  if (isSearch) {
-    searchCache.set(key, { at: Date.now(), data });
-    if (searchCache.size > 400) searchCache.delete(searchCache.keys().next().value);
-  }
-  return data;
+  try { return await spRaw(path, opts, retried); } finally { release(); }
 }
 
-async function spRaw(path, { method = 'GET', body, query } = {}, retried = false, waits = 0) {
+async function spRaw(path, { method = 'GET', body, query } = {}, retried = false) {
   const token = await getAccessToken();
   const url = new URL('https://api.spotify.com/v1' + path);
   if (query) Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, v));
+  const t0 = Date.now();
   const res = await fetch(url, {
     method,
     headers: { Authorization: 'Bearer ' + token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
+  logCall(method, path, query, res.status, res.headers.get('Retry-After'), Date.now() - t0);
   if (res.status === 401 && !retried) {
     const t = store.get('token', {}); t.expiresAt = 0; store.set('token', t);
     return spRaw(path, { method, body, query }, true);
   }
   if (res.status === 429) {
     const secs = Number(res.headers.get('Retry-After')) || 3;
-    if (secs <= 3 && waits < 1) {
-      await new Promise((r) => setTimeout(r, secs * 1000));
-      return spRaw(path, { method, body, query }, retried, waits + 1);
-    }
+    pausedUntil = Math.max(pausedUntil, Date.now() + secs * 1000);
+    limitGuess = Math.max(5, Math.min(limitGuess, callsSince(30000) - 1));
+    store.set('limitGuess', limitGuess);
     const e = new Error('Spotify pidió una pausa'); e.status = 429; e.retryAfter = secs; throw e;
   }
   if (res.status === 204) return null;
@@ -209,10 +216,10 @@ async function loadProfile(force, silent) {
   if (!force && cached && Date.now() - cached.at < 12 * 3600 * 1000) return cached;
   const calls = await Promise.allSettled([
     sp('/me/top/artists', { query: { time_range: 'medium_term', limit: 50 } }),
-    sp('/me/top/artists', { query: { time_range: 'long_term', limit: 50 } }),
+    Promise.resolve(null),
     sp('/me/top/artists', { query: { time_range: 'short_term', limit: 50 } }),
     sp('/me/top/tracks', { query: { time_range: 'short_term', limit: 50 } }),
-    sp('/me/top/tracks', { query: { time_range: 'medium_term', limit: 50 } }),
+    Promise.resolve(null),
     sp('/me/tracks', { query: { limit: 50 } }),
     sp('/me/player/recently-played', { query: { limit: 50 } }),
   ]);
@@ -261,6 +268,7 @@ function simplify(t) {
     artistIds: (t.artists || []).map((a) => a.id),
     artists: (t.artists || []).map((a) => a.name),
     year: Number(String((t.album && t.album.release_date) || '').slice(0, 4)) || 0,
+    img: (t.album && t.album.images && (t.album.images[t.album.images.length - 1] || {}).url) || '',
   };
 }
 const labelOf = (t) => `${t.artists.join(', ')} - ${t.name}`;
@@ -464,21 +472,50 @@ async function spSearch(q, type, offset, market) {
   return null;
 }
 
-async function searchTracks(q, offset = 0, market) {
-  const r = await spSearch(q, 'track', offset, market);
-  return ((r && r.tracks && r.tracks.items) || []).filter(Boolean).map(simplify);
+// Memoria de búsquedas en el teléfono: lo que ya se buscó hoy sale al instante, sin preguntarle a Spotify.
+const CACHE_MAX = 250;
+const memCache = { t: store.get('tcache', {}), a: store.get('acache', {}) };
+let cacheDirty = false;
+function cacheGet(kind, key, ttl) {
+  const e = memCache[kind][key];
+  return e && Date.now() - e.at < ttl ? e.v : null;
+}
+function cachePut(kind, key, v) {
+  const c = memCache[kind];
+  c[key] = { at: Date.now(), v };
+  const keys = Object.keys(c);
+  if (keys.length > CACHE_MAX) keys.sort((x, y) => c[x].at - c[y].at).slice(0, keys.length - CACHE_MAX).forEach((k) => delete c[k]);
+  if (!cacheDirty) { cacheDirty = true; setTimeout(() => { cacheDirty = false; store.set('tcache', memCache.t); store.set('acache', memCache.a); }, 1500); }
 }
 
+const tKey = (q, offset, market) => `${q}|${offset}|${market || ''}`;
+async function searchTracks(q, offset = 0, market) {
+  const key = tKey(q, offset, market);
+  const hit = cacheGet('t', key, 12 * 3600 * 1000);
+  if (hit) return hit;
+  const r = await spSearch(q, 'track', offset, market);
+  const out = ((r && r.tracks && r.tracks.items) || []).filter(Boolean).map(simplify);
+  if (r) cachePut('t', key, out);
+  return out;
+}
+
+// Una sola búsqueda trae al artista y sus canciones más populares a la vez.
 async function findArtist(name) {
+  const n = norm(name);
+  const hit = cacheGet('a', n, 7 * 24 * 3600 * 1000);
+  if (hit) return { ...hit };
   try {
-    const r = await spSearch(name, 'artist', 0);
-    const items = (r && r.artists && r.artists.items) || [];
-    const n = norm(name);
+    const r = await spSearch(name, 'artist,track', 0);
+    const items = ((r && r.artists && r.artists.items) || []).filter(Boolean);
     const exact = items.find((a) => norm(a.name) === n);
     const close = items.find((a) => norm(a.name).startsWith(n) || n.startsWith(norm(a.name)))
       || items.find((a) => similarity(norm(a.name), n) >= 0.75);
-    const best = exact || close || items[0] || null;
-    if (best) { rememberGenres(best.id, best.genres); best.exact = !!(exact || close); best.sim = similarity(norm(best.name), n); }
+    const raw = exact || close || items[0] || null;
+    if (!raw) return null;
+    rememberGenres(raw.id, raw.genres);
+    const tracks = ((r && r.tracks && r.tracks.items) || []).filter(Boolean).map(simplify).filter((t) => t.artistIds.includes(raw.id));
+    const best = { id: raw.id, name: raw.name, genres: raw.genres || [], exact: !!(exact || close), sim: similarity(norm(raw.name), n), tracks };
+    cachePut('a', n, best);
     return best;
   } catch { return null; }
 }
@@ -495,7 +532,23 @@ function similarity(a, b) {
 }
 
 // Junta varias búsquedas en paralelo (todas a la vez: así tarda lo que tarda la más lenta).
-const gather = (queries, market) => Promise.all(queries.map(([q, off]) => searchTracks(q, off, market)));
+// Todo lo que ya está guardado en el teléfono para una búsqueda (gratis: no le pregunta a Spotify).
+function cachedFor(prefix) {
+  const out = [];
+  Object.entries(memCache.t).forEach(([k, e]) => { if (k.startsWith(prefix) && Date.now() - e.at < 3 * 24 * 3600 * 1000) out.push(...e.v); });
+  return out;
+}
+
+// Junta búsquedas en paralelo. Las primeras "required" siempre se hacen; las demás solo si ya están
+// guardadas en el teléfono o si queda margen con Spotify (así nunca nos frena).
+function gather(queries, market, required = queries.length) {
+  let budget = budgetLeft();
+  return Promise.all(queries.map(([q, off], i) => {
+    if (cacheGet('t', tKey(q, off, market), 12 * 3600 * 1000)) return searchTracks(q, off, market);
+    if (i < required || budget > 0) { budget--; return searchTracks(q, off, market); }
+    return Promise.resolve([]);
+  }));
+}
 
 // Ordena como DJ: sin repetir canción, sin el mismo artista seguido.
 function arrange(groups, count, avoid) {
@@ -743,9 +796,13 @@ async function genreSession(alias, mode, profile, { market, newGenre } = {}) {
   const discover = mode.discover || newGenre;
   const yf = yearFilter(mode);
   const known = new Set(profile.artists.map((a) => a.id));
-  const base = discover ? 10 + rnd(4) * 10 : rnd(3) * 10;
+  const base = (discover ? 10 + rnd(4) * 10 : rnd(3) * 10) + (mode.more ? 20 : 0);
   const [g1, g2] = alias.genres;
-  const qs = [[`genre:"${g1}"${yf}`, base], [`genre:"${g1}"${yf}`, base + 10]];
+  let start = base;
+  if (discover || mode.more) {
+    for (let o = base; o <= 90; o += 10) { if (!cacheGet('t', tKey(`genre:"${g1}"${yf}`, o, market), 12 * 3600 * 1000)) { start = o; break; } }
+  }
+  const qs = [[`genre:"${g1}"${yf}`, start], [`genre:"${g1}"${yf}`, start + 10]];
   // Artistas de ese género (los tuyos y los conocidos) para que nunca quede corta.
   const favs = Object.values(memory().fav || {}).filter((f) => f.label === alias.label).map((f) => f.name);
   const seedNames = [
@@ -756,12 +813,13 @@ async function genreSession(alias, mode, profile, { market, newGenre } = {}) {
     ]),
   ].filter((n, i, arr) => arr.indexOf(n) === i).slice(0, 1);
   const seedQs = seedNames.map((n) => [`artist:"${n}"${yf}`, discover ? 10 : 0]);
-  const lists = await gather([...qs, ...seedQs], market);
+  const lists = await gather([...qs, ...seedQs], market, 1);
   if (aliasByLabel(alias.label)) learnAliases(lists.slice(0, qs.length).flat().map((t) => [t.artistIds[0], alias.label]));
   let found = shuffle(lists.flat());
+  found = found.concat(shuffle(cachedFor(`genre:"${g1}"`)), shuffle(seedNames.flatMap((n) => cachedFor(`artist:"${n}"`))));
   if (discover) found = found.filter((t) => !t.artistIds.some((id) => known.has(id)));
   if (found.length < 6) {
-    const more = (await gather([[`genre:"${g1}"`, 0], [`genre:"${g1}"`, 10], [`${alias.label}${yf}`, 0]], market)).flat();
+    const more = (await gather([[`genre:"${g1}"`, 0], [`${alias.label}${yf}`, 0]], market, found.length ? 0 : 1)).flat();
     found = found.concat(shuffle(more));
   }
   const mine = discover ? [] : shuffle(profile.tracks.filter((t) => t.artistIds.some((id) => (profile.aliasOf || {})[id] === alias.label)));
@@ -807,21 +865,22 @@ function pickNewGenre(profile) {
 
 async function countrySession(c, mode, profile) {
   const y = new Date().getFullYear();
-  const pick = shuffle(c.artists).slice(0, 4);
-  const lists = await gather(pick.map((a) => [`artist:"${a}" year:${y - 1}-${y}`, 0]), c.market);
+  const pick = shuffle(c.artists).slice(0, 3);
+  const lists = await gather(pick.map((a) => [`artist:"${a}" year:${y - 1}-${y}`, 0]), c.market, 1);
   const groups = lists.map((l, i) => l.filter((t) => t.artists.some((n) => norm(n) === norm(pick[i]))).slice(0, 6));
+  c.artists.forEach((a) => groups.push(shuffle(cachedFor(`artist:"${a}" year:${y - 1}-${y}`).filter((t) => t.artists.some((n) => norm(n) === norm(a)))).slice(0, 4)));
   return arrange(shuffle(groups), settings().count, avoidFor(profile, false));
 }
 
 async function motivationSession(profile) {
   const known = store.get('motivTracks', {});
-  const missing = shuffle(MOTIVATION.filter(([n]) => !known[n])).slice(0, 6);
+  const missing = shuffle(MOTIVATION.filter(([n]) => !known[n])).slice(0, Math.max(0, Math.min(2, budgetLeft() - 2)));
   const lists = await Promise.all(missing.map(([name, artist]) => searchTracks(`track:"${name}" artist:"${artist}"`, 0)));
   lists.forEach((l, i) => { const t = l.find((x) => x.artists.some((a) => norm(a).includes(norm(missing[i][1])))); if (t) known[missing[i][0]] = t; });
   store.set('motivTracks', known);
   let tracks = shuffle(Object.values(known));
   if (tracks.length < settings().count) {
-    const extra = await gather([['artist:"Eminem"', rnd(2) * 10], [`artist:"${shuffle(['50 Cent', 'DMX', 'Kanye West', 'Kendrick Lamar'])[0]}"`, 0]]);
+    const extra = await gather([['artist:"Eminem"', 0], [`artist:"${shuffle(['50 Cent', 'DMX', 'Kanye West', 'Kendrick Lamar'])[0]}"`, 0], ['artist:"Eminem"', 10]], undefined, 1);
     tracks = tracks.concat(shuffle(extra.flat()));
   }
   const avoid = avoidFor(profile, false);
@@ -856,16 +915,20 @@ async function probeArtist(artist, labels) {
 async function artistSession(artist, mode, profile) {
   const count = settings().count;
   const yf = yearFilter(mode);
-  const ownOffs = mode.deep ? [20, 30] : [0, 10];
+  const ownOffs = mode.deep || mode.more ? [20, 30] : [0, 10];
   const taste = tasteByGenre(profile);
   const guess = Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 3);
   const knownAl = aliasOfArtist(artist, profile.aliasOf);
-  const [ownLists, probed] = await Promise.all([
-    gather(ownOffs.map((o) => [`artist:"${artist.name}"${mode.fresh ? yf : ''}`, o])),
-    Promise.resolve(knownAl),
-  ]);
-  const al = knownAl || probed;
-  let own = ownLists.flat().filter((t) => t.artistIds.includes(artist.id));
+  const al = knownAl;
+  const onlyHimEarly = mode.popular || mode.deep || /\bsolo\b|\bpuro\b|\bpuras?\b|nada mas/.test(mode.raw || '');
+  const ownQs = mode.deep || mode.more ? ownOffs.map((o) => [`artist:"${artist.name}"`, o])
+    : mode.fresh ? [[`artist:"${artist.name}"${yf}`, 0]]
+    : [[`artist:"${artist.name}"`, 10]];
+  const genreQs = al && !onlyHimEarly && !mode.similar ? [[`genre:"${al.genres[0]}"${yf}`, rnd(2) * 10]] : al && mode.similar ? [[`genre:"${al.genres[0]}"${yf}`, 0], [`genre:"${al.genres[0]}"${yf}`, 10]] : [];
+  const firstPage = mode.deep || mode.fresh || mode.more ? [] : (artist.tracks || []);
+  const lists = await gather([...ownQs, ...genreQs], undefined, firstPage.length ? 0 : 1);
+  let own = [...firstPage, ...lists.slice(0, ownQs.length).flat(), ...(mode.fresh ? [] : cachedFor(`artist:"${artist.name}"|`))].filter((t) => t.artistIds.includes(artist.id));
+  const genreTracks = [...lists.slice(ownQs.length).flat(), ...(al ? cachedFor(`genre:"${al.genres[0]}"`) : [])].filter((t) => !t.artistIds.includes(artist.id));
   if (mode.fav) {
     const m = memory(); m.artists = m.artists || {}; m.fav = m.fav || {};
     m.artists[artist.id] = Math.max(3, (m.artists[artist.id] || 0) + 3);
@@ -878,15 +941,13 @@ async function artistSession(artist, mode, profile) {
   own.forEach((t) => t.artists.forEach((n, i) => { if (t.artistIds[i] !== artist.id) collabs[n] = (collabs[n] || 0) + 1; }));
   const collabNames = Object.keys(collabs).sort((a, b) => collabs[b] - collabs[a]).slice(0, al ? 0 : 1);
   if (!mode.popular && !mode.deep) own = shuffle(own);
-  const onlyHim = mode.popular || mode.deep || /\bsolo\b|\bpuro\b|\bpuras?\b|nada mas/.test(mode.raw || '');
+  const onlyHim = onlyHimEarly;
   let others = [];
   if (!onlyHim) {
-    const qs = collabNames.map((n) => [`artist:"${n}"`, 0]);
-    if (al) qs.push([`genre:"${al.genres[0]}"${yf}`, rnd(2) * 10]);
-    const lists = qs.length ? await gather(qs) : [];
-    const rel = lists.slice(0, collabNames.length).flat().filter((t) => !t.artistIds.includes(artist.id) && t.artists.some((n) => collabNames.includes(n)));
-    const gen = lists.slice(collabNames.length).flat().filter((t) => !t.artistIds.includes(artist.id));
-    others = [...shuffle(rel).slice(0, 6), ...shuffle(gen)];
+    // Sin género conocido: el artista con quien más colabora (una búsqueda que casi siempre ya está guardada).
+    const rel = collabNames.length ? (await gather(collabNames.map((n) => [`artist:"${n}"`, 0]), undefined, 0)).flat()
+      .filter((t) => !t.artistIds.includes(artist.id) && t.artists.some((n) => collabNames.includes(n))) : [];
+    others = [...shuffle(rel).slice(0, 6), ...shuffle(genreTracks)];
   }
   const ownShare = mode.similar && others.length ? 2 : onlyHim || others.length < 5 ? count : Math.ceil(count * 0.6);
   const tracks = arrange([own.slice(0, ownShare), others], count, avoidFor(profile, false, mode.more ? 200 : 0));
@@ -903,11 +964,11 @@ async function artistSession(artist, mode, profile) {
 async function playlistSession(query, profile) {
   try {
     const r = await spSearch(query, 'playlist', 0);
-    const pls = ((r && r.playlists && r.playlists.items) || []).filter(Boolean).slice(0, 4);
+    const pls = ((r && r.playlists && r.playlists.items) || []).filter(Boolean).slice(0, 1);
     const lists = await Promise.all(pls.map(async (pl) => {
       let d = null;
       try { d = await sp(`/playlists/${pl.id}/items`, { query: { limit: 50 } }); }
-      catch { try { d = await sp(`/playlists/${pl.id}/tracks`, { query: { limit: 50 } }); } catch { d = null; } }
+      catch (e) { if (e.status === 404) { try { d = await sp(`/playlists/${pl.id}/tracks`, { query: { limit: 50 } }); } catch { d = null; } } }
       const items = ((d && d.items) || []).map((i) => i && (i.item || i.track)).filter((t) => t && t.uri && t.type !== 'episode' && !t.is_local);
       return { pl, tracks: items.map(simplify) };
     }));
@@ -920,6 +981,7 @@ async function playlistSession(query, profile) {
 
 // Arma la sesión. Siempre UN solo género, para que todo fluya.
 async function buildSession(text, extra) {
+  await waitPause(5000);
   const { genre, mode, country, artistQuery, artistParts } = interpret(text);
   Object.assign(mode, extra || {});
   let profile = store.get('profile2', null);
@@ -956,9 +1018,9 @@ async function buildSession(text, extra) {
     const uniq = found.filter((x, i) => found.findIndex((y) => y.id === x.id) === i);
     if (uniq.length >= 2) {
       const per = Math.ceil(count / uniq.length) + 2;
-      const offs = mode.deep ? [20, 30, 40] : per > 10 ? [0, 10] : [0];
-      const lists = await gather(uniq.flatMap((ar) => offs.map((o) => [`artist:"${ar.name}"`, o])));
-      const groups = uniq.map((ar, i) => lists.slice(i * offs.length, (i + 1) * offs.length).flat().filter((t) => t.artistIds.includes(ar.id)).slice(0, per));
+      const offs = mode.deep || mode.more ? [20, 30] : per > 10 ? [10] : [];
+      const lists = offs.length ? await gather(uniq.flatMap((ar) => offs.map((o) => [`artist:"${ar.name}"`, o])), undefined, mode.deep || mode.more ? uniq.length : 0) : [];
+      const groups = uniq.map((ar, i) => [...(mode.deep || mode.more ? [] : (ar.tracks || [])), ...lists.slice(i * offs.length, (i + 1) * offs.length).flat()].filter((t) => t.artistIds.includes(ar.id)).slice(0, per));
       const tracks = arrange(groups, count, avoidFor(profile, false, mode.more ? 200 : 0));
       const names = uniq.map((x) => x.name).join(' y ');
       noteAsked(uniq, profile);
@@ -968,10 +1030,8 @@ async function buildSession(text, extra) {
 
   // Un artista, o algo que no reconocí: miro a la vez si es artista o género de Spotify.
   if (artistQuery) {
-    const [artist, asGenre] = await Promise.all([
-      findArtist(artistQuery),
-      genre ? Promise.resolve([]) : searchTracks(`genre:"${artistQuery}"`, 0),
-    ]);
+    const artist = await findArtist(artistQuery);
+    const asGenre = genre || (artist && artist.exact) ? [] : await searchTracks(`genre:"${artistQuery}"`, 0);
     if (!genre && asGenre.length >= 5 && !(artist && artist.exact)) {
       const alias = { label: artistQuery, genres: [artistQuery], fam: artistQuery, pl: artistQuery };
       const tracks = await genreSession(alias, mode, profile);
@@ -1031,16 +1091,32 @@ async function pickDevice() {
 }
 
 // Reproducir: una sola orden a Spotify. Si no hay Spotify activo, se usa el que esté en la lista.
-async function playUris(uris) {
+async function waitPause(maxMs) {
+  const left = pausedUntil - Date.now();
+  if (left > 0 && left <= maxMs) await new Promise((r) => setTimeout(r, left + 100));
+}
+async function playUris(uris, first) {
+  await waitPause(6000);
   try {
     await sp('/me/player/play', { method: 'PUT', body: { uris } });
   } catch (e) {
-    if (e.status !== 404) throw e;
-    const device = await pickDevice().catch(() => null);
-    if (!device) throw new Error('NO_DEVICE');
-    await sp('/me/player/play', { method: 'PUT', query: { device_id: device.id }, body: { uris } });
+    if (e.status === 429 && (e.retryAfter || 9) <= 6) {
+      await waitPause(6000);
+      await sp('/me/player/play', { method: 'PUT', body: { uris } });
+    } else {
+      if (e.status !== 404) throw e;
+      const device = await pickDevice().catch(() => null);
+      if (!device) throw new Error('NO_DEVICE');
+      await sp('/me/player/play', { method: 'PUT', query: { device_id: device.id }, body: { uris } });
+    }
   }
-  setTimeout(refreshNowPlaying, 1500);
+  if (first) showNowPlaying(first);
+}
+function showNowPlaying(t) {
+  current = { uri: t.uri, id: t.id, artistIds: t.artistIds, artistNames: t.artists, label: labelOf(t), playing: true };
+  $('npTitle').textContent = t.name;
+  $('npArtist').textContent = t.artists.join(', ');
+  if (t.img) $('npArt').src = t.img;
 }
 
 async function savePlaylist(name, uris) {
@@ -1246,7 +1322,7 @@ function learn(track, delta) {
 }
 
 async function rate(love) {
-  await refreshNowPlaying();
+  await refreshNowPlaying(true);
   if (!current) { addMessage('sofia', 'No veo nada sonando ahora mismo.'); return; }
   const track = current;
   learn(track, love ? 1 : -1);
@@ -1265,9 +1341,13 @@ async function rate(love) {
 let busy = false;
 let lastSpokenByVoice = false;
 
+let retryTimer = null;
+let queuedText = null;
 async function handleRequest(text, retryOf) {
   text = text.trim();
-  if (!text || busy) return;
+  if (!text) return;
+  if (!retryOf && retryTimer) { clearTimeout(retryTimer); retryTimer = null; } // lo nuevo que pidas manda
+  if (busy) { if (!retryOf) { queuedText = text; } return; }
   if (!settings().clientId) { showSetup(true); addMessage('error', 'Me falta tu Client ID de Spotify en Ajustes.'); return; }
   if (!store.get('token', null)) { showSetup(true); addMessage('error', 'Primero conéctame a tu Spotify con el botón verde.'); return; }
   busy = true;
@@ -1297,14 +1377,16 @@ async function handleRequest(text, retryOf) {
   try {
     const session = await buildSession(request, extra);
     store.set('lastRequest', { text: request, key: session.key, at: Date.now() });
+    growLimit();
     if (session.key && aliasByLabel(session.key)) { const m = memory(); m.asked = m.asked || {}; m.asked[session.key] = Math.min(20, (m.asked[session.key] || 0) + 0.5); saveMemory(m); }
     store.set('lastSession', { key: session.key, uris: session.tracks.map((x) => x.uri) });
     const tracks = session.tracks;
+    if (tracks.length < 5 && lastSearchError && lastSearchError.status === 429 && !extra.retry) throw lastSearchError;
     if (!tracks.length) {
       if (lastSearchError) throw lastSearchError;
       throw new Error('No encontré canciones para eso. Dímelo de otra forma, por ejemplo "pon corridos" o "pon Natanael Cano".');
     }
-    const playing = playUris(tracks.map((t) => t.uri));
+    const playing = playUris(tracks.map((t) => t.uri), tracks[0]);
     playing.catch(() => {});
     thinking.remove();
     const msg = session.intro;
@@ -1339,15 +1421,18 @@ async function handleRequest(text, retryOf) {
     await playing;
   } catch (e) {
     thinking.remove();
-    if (e.status === 429 && !extra.retry && (e.retryAfter || 0) <= 10) {
-      const secs = Math.ceil(e.retryAfter || 5);
+    if (e.status === 429 && !extra.retry && (e.retryAfter || 0) <= 20) {
+      const inWin = apiLog.filter((x) => x.t > Date.now() - 30000);
+      const freeAt = inWin.length > limitGuess - 4 ? inWin[inWin.length - (limitGuess - 4)].t + 30000 : 0;
+      const secs = Math.min(20, Math.max(e.retryAfter || 2, Math.ceil((freeAt - Date.now()) / 1000)));
       addMessage('sofia', `Spotify me pidió esperar ${secs} segundos. Lo intento sola en cuanto pase, no hagas nada.`);
-      setTimeout(() => handleRequest(request, extra), secs * 1000 + 300);
+      retryTimer = setTimeout(() => { retryTimer = null; handleRequest(request, extra); }, secs * 1000 + 300);
       return;
     }
     addMessage('error', friendlyError(e));
   } finally {
     busy = false;
+    if (queuedText) { const q = queuedText; queuedText = null; setTimeout(() => handleRequest(q), 0); }
   }
 }
 
@@ -1407,8 +1492,9 @@ function setupMic() {
 // ---------- Reproductor y valoraciones ----------
 let current = null;
 
-async function refreshNowPlaying() {
-  if (!store.get('token', null) || document.hidden) return;
+async function refreshNowPlaying(force) {
+  if (!store.get('token', null) || pausedUntil > Date.now()) return;
+  if (!force && (document.hidden || busy || budgetLeft() < 4)) return;
   try {
     const r = await sp('/me/player');
     const item = r && r.item;
@@ -1434,7 +1520,7 @@ function setupPlayer() {
   });
   $('btnLove').onclick = act(() => rate(true));
   $('btnDislike').onclick = act(() => rate(false));
-  setInterval(() => { if (!busy) refreshNowPlaying(); }, 30000);
+  setInterval(() => { if (!busy) refreshNowPlaying(); }, 45000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !busy) refreshNowPlaying(); });
 }
 
@@ -1484,8 +1570,35 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v9 · 18 nov';
+const VERSION = 'v10 · 18 nov';
+
+// Modo diagnóstico: toca 5 veces el logo "S" y SOFIA muestra cada llamada que hizo a Spotify.
+function showDiagnostics() {
+  const last = apiLog.slice(-40);
+  const n429 = apiLog.filter((x) => x.s === 429 && x.t > Date.now() - 600000).length;
+  const hhmmss = (t) => new Date(t).toLocaleTimeString('es', { hour12: false });
+  const text = `Diagnóstico SOFIA ${VERSION}\n` +
+    `Llamadas a Spotify: ${callsSince(30000)} en 30 s · ${callsSince(60000)} en 1 min · ${callsSince(600000)} en 10 min\n` +
+    `Pausas pedidas por Spotify (429) en 10 min: ${n429}${pausedUntil > Date.now() ? ` · en pausa ${Math.ceil((pausedUntil - Date.now()) / 1000)} s más` : ''}\n\n` +
+    last.map((x) => `${hhmmss(x.t)} ${x.s} ${x.m} ${x.p}${x.ra ? ' espera ' + x.ra + 's' : ''} ${x.ms}ms ${x.v && x.v !== VERSION ? '(' + x.v + ')' : ''}`).join('\n');
+  const b = addMessage('sofia', text);
+  b.style.fontSize = '12px';
+  const copy = document.createElement('button');
+  copy.textContent = 'Copiar diagnóstico';
+  copy.onclick = async () => { try { await navigator.clipboard.writeText(text); copy.textContent = 'Copiado ✓'; } catch { copy.textContent = 'No se pudo copiar'; } };
+  const actions = document.createElement('div'); actions.className = 'actions'; actions.appendChild(copy); b.appendChild(actions);
+}
+function setupDiagnostics() {
+  let taps = [];
+  const logo = document.querySelector('.logo');
+  if (!logo) return;
+  logo.addEventListener('click', () => {
+    taps = [...taps.filter((t) => Date.now() - t < 3000), Date.now()];
+    if (taps.length >= 5) { taps = []; showDiagnostics(); }
+  });
+}
 async function init() {
+  setupDiagnostics();
   const v = document.getElementById('version'); if (v) v.textContent = VERSION;
   setupSettings();
   setupPlayer();
