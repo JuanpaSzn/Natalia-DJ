@@ -138,7 +138,37 @@ async function getAccessToken() {
   return fresh.access;
 }
 
-async function sp(path, { method = 'GET', body, query } = {}, retried = false, waits = 0) {
+// Máximo 3 peticiones a la vez a Spotify, y las búsquedas repetidas salen de memoria (10 min).
+let inFlight = 0;
+const waiting = [];
+let pausedUntil = 0;
+const searchCache = new Map();
+async function slot() {
+  if (inFlight >= 3) await new Promise((r) => waiting.push(r));
+  inFlight++;
+  const wait = pausedUntil - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+function release() { inFlight--; const next = waiting.shift(); if (next) next(); }
+
+async function sp(path, opts = {}, retried = false, waits = 0) {
+  const isSearch = path === '/search' && (!opts.method || opts.method === 'GET');
+  const key = isSearch ? JSON.stringify(opts.query) : '';
+  if (isSearch) {
+    const hit = searchCache.get(key);
+    if (hit && Date.now() - hit.at < 600000) return hit.data;
+  }
+  await slot();
+  let data;
+  try { data = await spRaw(path, opts, retried, waits); } finally { release(); }
+  if (isSearch) {
+    searchCache.set(key, { at: Date.now(), data });
+    if (searchCache.size > 400) searchCache.delete(searchCache.keys().next().value);
+  }
+  return data;
+}
+
+async function spRaw(path, { method = 'GET', body, query } = {}, retried = false, waits = 0) {
   const token = await getAccessToken();
   const url = new URL('https://api.spotify.com/v1' + path);
   if (query) Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, v));
@@ -149,12 +179,16 @@ async function sp(path, { method = 'GET', body, query } = {}, retried = false, w
   });
   if (res.status === 401 && !retried) {
     const t = store.get('token', {}); t.expiresAt = 0; store.set('token', t);
-    return sp(path, { method, body, query }, true);
+    return spRaw(path, { method, body, query }, true);
   }
-  if (res.status === 429 && waits < 2) {
-    const secs = Math.min(5, Number(res.headers.get('Retry-After')) || 2);
-    await new Promise((r) => setTimeout(r, secs * 1000));
-    return sp(path, { method, body, query }, retried, waits + 1);
+  if (res.status === 429) {
+    const secs = Number(res.headers.get('Retry-After')) || 3;
+    pausedUntil = Math.max(pausedUntil, Date.now() + secs * 1000);
+    if (secs <= 6 && waits < 2) {
+      await new Promise((r) => setTimeout(r, secs * 1000));
+      return spRaw(path, { method, body, query }, retried, waits + 1);
+    }
+    const e = new Error('Spotify pidió una pausa'); e.status = 429; e.retryAfter = secs; throw e;
   }
   if (res.status === 204) return null;
   const text = await res.text();
@@ -344,6 +378,7 @@ const RX = {
   motiv: /motiv|gym|gimnasio|entren|ejercicio|pesas|correr|animo|echarle ganas|dar todo/,
   similar: /parecid|similar|como (a )?|estilo de|tipo /,
   deep: /menos (escuchad|conocid|famos|sonad|popular|pegad)|rarezas|no tan (conocid|famos|sonad|pegad)|joyitas?|joyas|underrated|ocultas|casi nadie|poca gente|pocos (han )?escuch|poco (escuchad|conocid|sonad)|nadie conoce|b ?sides/,
+  fav: /me encanta|me gusta mucho|me fascina|la amo|lo amo|los amo|amo a|favorit|la mejor|el mejor|me mata|la rompe|lo rompe/,
   popular: /popular|famos|exitos|hits|mejores|mas escuchad|mas sonad|pegadit|pegad[oa]s|temazos|\btop\b/,
   country: /que se escucha|escuchando en|suena en|sonando en|pegado en|top (de )?|en colombia|en puerto|en mexico|en espana|en argentina|en republica|en estados/,
   organize: /(organiz|orden|clasific|divid|separ|acomod)\w*.*(me gusta|megusta|favorit|likes|gustad|guardad|biblioteca)/,
@@ -357,7 +392,23 @@ const COMMANDS = [
 ];
 const FILLER = /\b(parce|parcero|parcera|mano|bro|llave|pana|pa|socio|hermano|rolas?|rolitas?|temazos?|temitas?|cancioncitas?|chimba|bacan[oa]s?|melo|ome|pues|vea|mijo|mija|nea|pero|sean|sea|casi|nadie|haya|hayan|escuchado|conocido|gente|poca|pocos|porfis|plis|please|sofia|sofi|ve|oye|hola|por favor|porfa|ponme|pon|ponga|pongas|reproduce|reproducir|quiero|quisiera|escuchar|oir|un|una|unos|unas|tema|temas|cancion|canciones|musica|de|del|la|el|los|las|algo|me|mi|mis|que|y|en|con|a|al|hoy|ahora|solo|puro|pura|puros|full|mas|otra|otras|otro|otros|bien|tipo|artistas?|parecid[oa]s?|similares?|estilo|como|recomiendame|recomienda|recomendar|dame|music|gente|esta|estan|estos|dias|escuchando|escucha|suena|sonando|pais)\b/g;
 const STOP_STEM = /^(moda|nuev|tendenc|recient|estren|actual|momento|pegand|viral|lanzamient|viej|antigu|clasic|descubr|sorprend|nunca|conozc|escuchad|distint|genero|gust|favorit|relaj|tranquil|dormir|descans|motiv|energ|entren|ejercic|fiesta|rumba|prend|parche|parecid|similar|estilo|recomiend|ingles|espanol|siempre|sesion|playlist|ponme|sofia|gimnas|concentr|estudi|semana|escuch|oig)/;
-const STOP_EXACT = new Set(['pon', 'no', 'nada', 'todo', 'esa', 'eso', 'este', 'lo', 'le', 'se', 'su', 'sus', 'para', 'haya', 'antes', 'old', 'school', 'dj', 'lista', 'calma', 'calmada', 'suave', 'chill', 'gym', 'activa', 'activo', 'activarme', 'totalmente', 'diferente', 'gym', 'pesas', 'correr', 'animo', 'top', 'he', 'ha', 'has', 'yo', 'ya', 'menos', 'rarezas', 'joyitas', 'ocultas', 'populares', 'popular', 'famosas', 'famosos', 'exitos', 'hits', 'mejores', 'sonadas', 'conocidas', 'joyas', 'joyita', 'joyitas', 'unas', 'bueno', 'buenas', 'buenos', 'chimbas', 'duro', 'durisimo', 'brutal']);
+const STOP_EXACT = new Set(['pon', 'no', 'nada', 'todo', 'esa', 'eso', 'este', 'lo', 'le', 'se', 'su', 'sus', 'para', 'haya', 'antes', 'old', 'school', 'dj', 'lista', 'calma', 'calmada', 'suave', 'chill', 'gym', 'activa', 'activo', 'activarme', 'totalmente', 'diferente', 'gym', 'pesas', 'correr', 'animo', 'top', 'he', 'ha', 'has', 'yo', 'ya', 'menos', 'rarezas', 'joyitas', 'ocultas', 'populares', 'popular', 'famosas', 'famosos', 'exitos', 'hits', 'mejores', 'sonadas', 'conocidas', 'joyas', 'joyita', 'joyitas', 'unas', 'bueno', 'buenas', 'buenos', 'chimbas', 'duro', 'durisimo', 'brutal', 'es', 'son', 'era', 'cantante', 'cantantes', 'artista', 'favorita', 'favorito', 'favoritas', 'favoritos', 'encanta', 'fascina', 'amo', 'mata', 'rompe', 'mucho', 'mejor', 'banda', 'grupo']);
+
+// Quita las palabras de relleno pero deja los artículos que son parte del nombre:
+// "quiero escuchar de la rose" -> "la rose", "pon el alfa" -> "el alfa", "los tigres del norte".
+const FILLER_WORD = new RegExp('^(?:' + FILLER.source + ')$');
+function cleanPart(p) {
+  const words = p.replace(/por favor|de verdad/g, ' ').split(' ').filter(Boolean);
+  const isContent = (w) => w && !FILLER_WORD.test(w) && !STOP_EXACT.has(w) && !STOP_STEM.test(w);
+  const keep = words.map(isContent);
+  for (let i = words.length - 2; i >= 0; i--) {
+    const w = words[i];
+    if (keep[i] || !keep[i + 1]) continue;
+    if (/^(la|el|los|las|lo)$/.test(w)) keep[i] = true;
+    else if (/^(de|del)$/.test(w) && i > 0 && keep[i - 1]) keep[i] = true;
+  }
+  return words.filter((w, i) => keep[i]).join(' ');
+}
 
 // El género solo cuenta si la palabra termina ahí ("corridos belicones" no es "corridos belico" + "nes").
 const ALIAS_RX = new Map(GENRE_ALIASES.map((g) => [g, new RegExp('(?:' + g.re.source + ')(?![a-z])')]));
@@ -378,7 +429,7 @@ function interpret(text) {
   mode.raw = t;
   // Varios artistas: "Luis R Conriquez y Natanael Cano", "Feid, Blessd".
   const parts = rest.replace(/ (y|e|and|junto con|con|mezclado con|mezcla de) |,/g, ' | ').split('|')
-    .map((p) => p.replace(FILLER, ' ').split(' ').filter((w) => w && !STOP_EXACT.has(w) && !STOP_STEM.test(w)).join(' '))
+    .map(cleanPart)
     .filter((p) => p.length >= 2);
   rest = parts.join(' ');
   const artistQuery = rest.length >= 2 && !mode.likes ? rest : '';
@@ -620,20 +671,25 @@ function classifyProfile(profile) {
 
 // Para los artistas que todavía no sé, le pregunto a Spotify "¿este artista es de este género?".
 async function probeUnknownArtists(profile) {
-  const unknown = profile.artists.filter((a) => !profile.aliasOf[a.id]).sort((a, b) => b.score - a.score).slice(0, 12);
+  if (profile.probedAt && Date.now() - profile.probedAt < 24 * 3600 * 1000) return profile;
+  profile.probedAt = Date.now();
+  store.set('profile2', profile);
+  const unknown = profile.artists.filter((a) => !profile.aliasOf[a.id]).sort((a, b) => b.score - a.score).slice(0, 8);
   if (!unknown.length) return profile;
   const taste = tasteByGenre(profile);
-  const candidates = [...new Set([...Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 3), 'corridos tumbados', 'reguetón', 'trap latino', 'rap'])].slice(0, 5).map(aliasByLabel).filter(Boolean);
+  const candidates = Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 3).map(aliasByLabel).filter(Boolean);
   const jobs = [];
   unknown.forEach((a) => candidates.forEach((al) => jobs.push([a, al])));
   const found = {};
-  await pool(jobs, 4, async ([a, al]) => {
-    if (found[a.id]) return;
+  let stop = false;
+  await pool(jobs, 1, async ([a, al]) => {
+    if (found[a.id] || stop || busy) return;
+    await new Promise((r) => setTimeout(r, 400));
     try {
       const r = await sp('/search', { query: { q: `artist:"${a.name}" genre:"${al.genres[0]}"`, type: 'track', limit: 1 } });
       const t = r && r.tracks && r.tracks.items && r.tracks.items[0];
       if (t && t.artists.some((x) => x.id === a.id)) found[a.id] = al.label;
-    } catch { /* sin respuesta: lo dejamos sin género */ }
+    } catch (e) { if (e.status === 429) stop = true; }
   });
   learnAliases(Object.entries(found));
   Object.assign(profile.aliasOf, found);
@@ -677,7 +733,7 @@ function heardUris(profile) {
 
 function avoidFor(profile, strict, recent = 80) {
   const m = memory();
-  const uris = new Set(m.disliked.map((x) => x.uri));
+  const uris = new Set(m.disliked.filter((x) => Date.now() - (x.at || 0) < 90 * 86400000).map((x) => x.uri));
   if (strict) heardUris(profile).forEach((u) => uris.add(u));
   else if (recent) m.suggested.slice(-recent).forEach((x) => uris.add(x.uri));
   const artists = new Set(Object.entries(m.artists || {}).filter(([, s]) => s <= -2).map(([id]) => id));
@@ -692,14 +748,17 @@ async function genreSession(alias, mode, profile, { market, newGenre } = {}) {
   const known = new Set(profile.artists.map((a) => a.id));
   const base = discover ? 10 + rnd(4) * 10 : rnd(3) * 10;
   const [g1, g2] = alias.genres;
-  const qs = [[`genre:"${g1}"${yf}`, base], [`genre:"${g1}"${yf}`, base + 10], [`genre:"${g1}"${yf}`, base + 20], [`genre:"${g1}"${yf}`, base + 30]];
-  if (g2) qs.push([`genre:"${g2}"${yf}`, base], [`genre:"${g2}"${yf}`, base + 10]);
-  if (discover) qs.push([`genre:"${g1}"${yf}`, 0]);
+  const qs = [[`genre:"${g1}"${yf}`, base], [`genre:"${g1}"${yf}`, base + 10], [`genre:"${g1}"${yf}`, base + 20]];
+  if (g2) qs.push([`genre:"${g2}"${yf}`, base]);
   // Artistas de ese género (los tuyos y los conocidos) para que nunca quede corta.
-  const seedNames = shuffle([
-    ...profile.artists.filter((a) => (profile.aliasOf || {})[a.id] === alias.label).slice(0, 6).map((a) => a.name),
-    ...shuffle(ARTIST_SEEDS[alias.label] || []).slice(0, 4),
-  ]).slice(0, 5);
+  const favs = Object.values(memory().fav || {}).filter((f) => f.label === alias.label).map((f) => f.name);
+  const seedNames = [
+    ...shuffle(favs).slice(0, 2),
+    ...shuffle([
+      ...profile.artists.filter((a) => (profile.aliasOf || {})[a.id] === alias.label).slice(0, 6).map((a) => a.name),
+      ...shuffle(ARTIST_SEEDS[alias.label] || []).slice(0, 4),
+    ]),
+  ].filter((n, i, arr) => arr.indexOf(n) === i).slice(0, 3);
   const seedQs = seedNames.map((n) => [`artist:"${n}"${yf}`, discover ? 10 : 0]);
   const lists = await gather([...qs, ...seedQs], market);
   if (aliasByLabel(alias.label)) learnAliases(lists.slice(0, qs.length).flat().map((t) => [t.artistIds[0], alias.label]));
@@ -799,25 +858,40 @@ async function artistSession(artist, mode, profile) {
   const knownAl = aliasOfArtist(artist, profile.aliasOf);
   const [ownLists, probed] = await Promise.all([
     gather(ownOffs.map((o) => [`artist:"${artist.name}"${mode.fresh ? yf : ''}`, o])),
-    knownAl ? Promise.resolve(knownAl) : probeArtist(artist, [...new Set([...guess, 'corridos tumbados', 'reguetón', 'trap latino', 'rap', 'pop latino'])].slice(0, 6)),
+    knownAl ? Promise.resolve(knownAl) : probeArtist(artist, guess.length ? guess : ['reguetón', 'trap latino', 'pop latino']),
   ]);
   const al = knownAl || probed;
   let own = ownLists.flat().filter((t) => t.artistIds.includes(artist.id));
+  if (mode.fav) {
+    const m = memory(); m.artists = m.artists || {}; m.fav = m.fav || {};
+    m.artists[artist.id] = Math.max(3, (m.artists[artist.id] || 0) + 3);
+    m.fav[artist.id] = { name: artist.name, label: al ? al.label : '', at: Date.now() };
+    if (al) { m.genres = m.genres || {}; m.genres[al.label] = Math.min(10, (m.genres[al.label] || 0) + 1); }
+    saveMemory(m);
+  }
+  // Relacionados: con quién colabora (los "feat") y, si sé su género, más de ese género.
+  const collabs = {};
+  own.forEach((t) => t.artists.forEach((n, i) => { if (t.artistIds[i] !== artist.id) collabs[n] = (collabs[n] || 0) + 1; }));
+  const collabNames = Object.keys(collabs).sort((a, b) => collabs[b] - collabs[a]).slice(0, 2);
   if (!mode.popular && !mode.deep) own = shuffle(own);
   const onlyHim = mode.popular || mode.deep || /\bsolo\b|\bpuro\b|\bpuras?\b|nada mas/.test(mode.raw || '');
   let others = [];
-  if (al && !onlyHim) {
-    const g = al.genres[0];
-    const lists = await gather([[`genre:"${g}"${yf}`, rnd(2) * 10], [`genre:"${g}"${yf}`, 20], [`genre:"${g}"${yf}`, 30]]);
-    others = shuffle(lists.flat().filter((t) => !t.artistIds.includes(artist.id)));
+  if (!onlyHim) {
+    const qs = collabNames.map((n) => [`artist:"${n}"`, 0]);
+    if (al) qs.push([`genre:"${al.genres[0]}"${yf}`, rnd(2) * 10], [`genre:"${al.genres[0]}"${yf}`, 20]);
+    const lists = qs.length ? await gather(qs) : [];
+    const rel = lists.slice(0, collabNames.length).flat().filter((t) => !t.artistIds.includes(artist.id) && t.artists.some((n) => collabNames.includes(n)));
+    const gen = lists.slice(collabNames.length).flat().filter((t) => !t.artistIds.includes(artist.id));
+    others = [...shuffle(rel).slice(0, 6), ...shuffle(gen)];
   }
-  const ownShare = mode.similar ? 2 : onlyHim ? count : Math.ceil(count * 0.6);
+  const ownShare = mode.similar && others.length ? 2 : onlyHim || others.length < 5 ? count : Math.ceil(count * 0.6);
   const tracks = arrange([own.slice(0, ownShare), others], count, avoidFor(profile, false, mode.more ? 200 : 0));
   noteAsked([artist], profile);
   const label = mode.similar ? `parecidos a ${artist.name}` : artist.name;
   const what = mode.deep ? 'las menos conocidas de ' : mode.popular ? 'lo más popular de ' : '';
-  const intro = mode.similar ? `Artistas del estilo de ${artist.name}${al ? `, todo ${al.label}` : ''}.`
-    : `Va ${what}${artist.name}${!onlyHim && al ? `, y para que fluya, más ${al.label} del mismo estilo` : ''}.`;
+  let intro = mode.similar ? `Artistas del estilo de ${artist.name}${al ? `, todo ${al.label}` : ''}.`
+    : `Va ${what}${artist.name}${!onlyHim && others.length ? `, y para que fluya, artistas relacionados${al ? ` de ${al.label}` : ''}` : ''}.`;
+  if (mode.fav) intro = `¡Anotado! ${artist.name} quedó en tus favoritos: desde ahora te pondré más de ${artist.name} y de lo relacionado. Si algo relacionado no te gusta, dale 👎 y no te lo vuelvo a poner. ` + intro;
   return { tracks, key: al ? al.label : '', label, intro };
 }
 
@@ -1054,13 +1128,15 @@ async function classifyArtists(tracks, onProgress) {
   const candidates = [...new Set([...Object.keys(counts).sort((a, b) => counts[b] - counts[a]).slice(0, 5), 'corridos tumbados', 'reguetón', 'trap latino', 'rap', 'pop latino'])].slice(0, 7).map(aliasByLabel).filter(Boolean);
   const unknown = Object.keys(names).filter((id) => !map[id]).sort((a, b) => freq[b] - freq[a]).slice(0, 40);
   let done = 0;
-  await pool(unknown, 4, async (id) => {
+  let stop = false;
+  await pool(unknown, 2, async (id) => {
     for (const al of candidates) {
+      if (stop) break;
       try {
         const r = await sp('/search', { query: { q: `artist:"${names[id]}" genre:"${al.genres[0]}"`, type: 'track', limit: 1 } });
         const t = r && r.tracks && r.tracks.items && r.tracks.items[0];
         if (t && t.artists.some((x) => x.id === id)) { map[id] = al.label; break; }
-      } catch { break; }
+      } catch (e) { if (e.status === 429) stop = true; break; }
     }
     if (onProgress) onProgress(++done, unknown.length);
   });
@@ -1187,14 +1263,13 @@ async function rate(love) {
 let busy = false;
 let lastSpokenByVoice = false;
 
-async function handleRequest(text) {
+async function handleRequest(text, retryOf) {
   text = text.trim();
   if (!text || busy) return;
   if (!settings().clientId) { showSetup(true); addMessage('error', 'Me falta tu Client ID de Spotify en Ajustes.'); return; }
   if (!store.get('token', null)) { showSetup(true); addMessage('error', 'Primero conéctame a tu Spotify con el botón verde.'); return; }
   busy = true;
-  addMessage('user', text);
-  pushHistory('user', text);
+  if (!retryOf) { addMessage('user', text); pushHistory('user', text); }
   const t = norm(text).replace(/^(ve |oye )?(sofi|sofia)\b ?/, '').replace(/ (por favor|porfa)$/, '').trim();
   const cmd = COMMANDS.find((c) => c.re.test(t));
   if (cmd) {
@@ -1210,15 +1285,16 @@ async function handleRequest(text) {
   // Memoria de la conversación: "pon más", "otras", "más nuevas"… siguen con lo último que pediste.
   let request = text;
   let extra = {};
-  const last = store.get('lastRequest', null);
+  const last = retryOf ? null : store.get('lastRequest', null);
+  if (retryOf) extra = { ...retryOf, retry: true };
   const FOLLOW = /^(y )?(pon(me)? |dame |quiero |echale )?(mas|otras?|otros?|sigue|seguir|continua|lo mismo|igual|otra tanda|mas canciones|mas temas|mas de eso|mas asi)( (de )?(eso|esas?|esos?|asi|parecid\w*|igual\w*|similares?|canciones|temas|del mismo|de lo mismo|estilo))*$/;
   const TWEAK = /^(y |pero |ahora )?(pon(me)? |dame )?(mas |las |unas |solo )?(nuev|recient|viej|antigu|clasic|popular|famos|pegad|menos|joyit|rarez|tranquil|suave)\w*( \w+){0,3}$/;
-  if (last && FOLLOW.test(t)) { request = last.text; extra = { more: true }; }
+  if (last && FOLLOW.test(t)) { request = last.key && aliasByLabel(last.key) && !interpret(last.text).genre && !interpret(last.text).artistQuery ? last.key : last.text; extra = { more: true }; }
   else if (last && TWEAK.test(t) && !interpret(t).artistQuery && !interpret(t).genre) { request = last.text + ' ' + t; extra = { more: true }; }
   const thinking = addMessage('sofia thinking', 'Armando tu sesión…');
   try {
     const session = await buildSession(request, extra);
-    store.set('lastRequest', { text: request, at: Date.now() });
+    store.set('lastRequest', { text: request, key: session.key, at: Date.now() });
     if (session.key && aliasByLabel(session.key)) { const m = memory(); m.asked = m.asked || {}; m.asked[session.key] = Math.min(20, (m.asked[session.key] || 0) + 0.5); saveMemory(m); }
     store.set('lastSession', { key: session.key, uris: session.tracks.map((x) => x.uri) });
     const tracks = session.tracks;
@@ -1261,6 +1337,12 @@ async function handleRequest(text) {
     await playing;
   } catch (e) {
     thinking.remove();
+    if (e.status === 429 && !extra.retry && (e.retryAfter || 0) <= 40) {
+      const secs = Math.ceil(e.retryAfter || 5);
+      addMessage('sofia', `Spotify me pidió esperar ${secs} segundos. Lo intento sola en cuanto pase, no hagas nada.`);
+      setTimeout(() => handleRequest(request, extra), secs * 1000 + 300);
+      return;
+    }
     addMessage('error', friendlyError(e));
   } finally {
     busy = false;
@@ -1269,7 +1351,7 @@ async function handleRequest(text) {
 
 function friendlyError(e) {
   if (e.message === 'NO_LOGIN') return 'Necesito que me conectes a Spotify (Ajustes ⚙︎).';
-  if (e.status === 429) return 'Hay muchas peticiones seguidas. Espera un minuto y vuelve a intentarlo.';
+  if (e.status === 429) return `Spotify me pidió una pausa${e.retryAfter ? ` de ${Math.ceil(e.retryAfter)} segundos` : ''}. Vuelve a pedírmelo en un momento.`;
   if (e.status === 403 && /premium/i.test(e.message)) return 'Spotify pide Premium para controlar la reproducción.';
   if (e.status === 403) return 'Spotify no me dejó (403: ' + e.message + '). Revisa en Spotify for Developers que tu correo esté en "User Management" de tu app.';
   if (e.status === 404 && /device/i.test(e.message)) return 'No encuentro Spotify activo. Abre Spotify en el iPhone, pon algo un segundo y vuelve a pedírmelo.';
@@ -1348,7 +1430,7 @@ function setupPlayer() {
   });
   $('btnLove').onclick = act(() => rate(true));
   $('btnDislike').onclick = act(() => rate(false));
-  setInterval(refreshNowPlaying, 5000);
+  setInterval(() => { if (!busy) refreshNowPlaying(); }, 15000);
   document.addEventListener('visibilitychange', refreshNowPlaying);
 }
 
@@ -1392,7 +1474,7 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v5 · 18 nov';
+const VERSION = 'v6 · 18 nov';
 async function init() {
   const v = document.getElementById('version'); if (v) v.textContent = VERSION;
   setupSettings();
@@ -1416,7 +1498,7 @@ async function init() {
   else {
     const sum = tasteSummary(p);
     if (sum) addMessage('sofia', 'Tus gustos ahora mismo:\n' + sum);
-    if (Date.now() - p.at > 6 * 3600 * 1000) loadProfile(true, true).catch(() => {}); // se actualiza en segundo plano
+    if (Date.now() - p.at > 24 * 3600 * 1000) setTimeout(() => { if (!busy) loadProfile(true, true).catch(() => {}); }, 30000); // una vez al día, en segundo plano
   }
   refreshNowPlaying();
 }
