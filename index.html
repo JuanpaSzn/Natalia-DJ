@@ -23,19 +23,13 @@
   <!-- Pantalla de configuración inicial -->
   <section id="setup" class="panel hidden">
     <h2>Configura a SOFIA</h2>
-    <p class="hint">Solo se hace una vez. Estas llaves se guardan únicamente en este teléfono.</p>
+    <p class="hint">Solo se hace una vez. Tu Client ID se guarda únicamente en este teléfono.</p>
     <p class="hint">Redirect URI para tu app de Spotify: <code id="redirectHint"></code></p>
     <label>Client ID de Spotify
       <input id="inClientId" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Ej: 3f2a9c1e5b7d4e8a...">
     </label>
-    <label>Llave de Gemini (Google AI Studio)
-      <input id="inGeminiKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="AIza...">
-    </label>
     <details>
       <summary>Opciones avanzadas</summary>
-      <label>Modelo de Gemini
-        <input id="inModel" autocomplete="off" autocapitalize="off" spellcheck="false">
-      </label>
       <label>Canciones por sesión
         <input id="inCount" type="number" min="5" max="40">
       </label>
@@ -60,13 +54,15 @@
   <main id="chat" class="chat">
     <div id="messages" class="messages" aria-live="polite"></div>
     <div class="chips" id="chips">
-      <button data-q="Ponme música que me guste, de mis artistas y parecidos">Mis gustos</button>
-      <button data-q="Sorpréndeme con música que nunca haya escuchado pero que encaje con mis gustos">Descubrir</button>
-      <button data-q="Ponme lo que está de moda ahora mismo y que me pueda gustar">De moda</button>
-      <button data-q="Quiero conocer un género nuevo para mí, que tenga algo de lo que me gusta">Género nuevo</button>
-      <button data-q="Música para motivarme">Motivación</button>
-      <button data-q="Música relajante">Relajante</button>
-      <button data-q="Ponme clásicos antiguos de los géneros que escucho">Viejitas</button>
+      <button data-q="Mis gustos">Mis gustos</button>
+      <button data-q="Lo nuevo de mis gustos">Lo nuevo</button>
+      <button data-q="Descubrir canciones que nunca he escuchado de mis gustos">Descubrir</button>
+      <button data-q="Un género nuevo que no escuche">Género nuevo</button>
+      <button data-q="Motivación">Motivación</button>
+      <button data-q="Relajante">Relajante</button>
+      <button data-q="Lo que se escucha en Colombia">Colombia</button>
+      <button data-q="Lo que se escucha en Puerto Rico">Puerto Rico</button>
+      <button data-q="Organiza mis me gusta por géneros">Organizar mis Me gusta</button>
     </div>
   </main>
 
@@ -88,7 +84,7 @@
 
   <form id="composer" class="composer">
     <button type="button" id="btnMic" class="icon-btn" aria-label="Hablar">🎤</button>
-    <input id="inMsg" placeholder="Sofia, ponme..." autocomplete="off">
+    <input id="inMsg" placeholder="Pon corridos, pon Natanael Cano…" autocomplete="off">
     <button type="submit" class="primary send" aria-label="Enviar">➤</button>
   </form>
 
