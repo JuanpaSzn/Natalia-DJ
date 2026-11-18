@@ -379,16 +379,38 @@ const yearFilter = (mode) => {
   return '';
 };
 
-async function searchTracks(q, offset = 0, market = 'from_token') {
-  try {
-    const r = await sp('/search', { query: { q, type: 'track', limit: 10, offset, market } });
-    return ((r && r.tracks && r.tracks.items) || []).filter(Boolean).map(simplify);
-  } catch { return []; }
+// Búsqueda a prueba de fallos: si Spotify rechaza una forma de preguntar, prueba otra más simple
+// y recuerda cuál funcionó. Guarda el último error real para mostrártelo.
+let searchShape = 0;
+let lastSearchError = null;
+async function spSearch(q, type, offset, market) {
+  const shapes = [
+    { q, type, limit: 10, offset, market: market || 'from_token' },
+    { q, type, limit: 10, offset, ...(market && market !== 'from_token' ? { market } : {}) },
+    { q, type, limit: 5 },
+  ];
+  for (let i = searchShape; i < shapes.length; i++) {
+    try {
+      const r = await sp('/search', { query: shapes[i] });
+      if (i > searchShape) searchShape = i;
+      lastSearchError = null;
+      return r;
+    } catch (e) {
+      lastSearchError = e;
+      if (e.message === 'NO_LOGIN' || e.status === 401 || e.status === 429) break;
+    }
+  }
+  return null;
+}
+
+async function searchTracks(q, offset = 0, market) {
+  const r = await spSearch(q, 'track', offset, market);
+  return ((r && r.tracks && r.tracks.items) || []).filter(Boolean).map(simplify);
 }
 
 async function findArtist(name) {
   try {
-    const r = await sp('/search', { query: { q: name, type: 'artist', limit: 5, market: 'from_token' } });
+    const r = await spSearch(name, 'artist', 0);
     const items = (r && r.artists && r.artists.items) || [];
     const n = norm(name);
     const exact = items.find((a) => norm(a.name) === n);
@@ -875,7 +897,10 @@ async function handleRequest(text) {
     const session = await buildSession(text);
     store.set('lastSession', { key: session.key, uris: session.tracks.map((x) => x.uri) });
     const tracks = session.tracks;
-    if (!tracks.length) throw new Error('No encontré canciones para eso. Dímelo de otra forma, por ejemplo "pon corridos" o "pon Natanael Cano".');
+    if (!tracks.length) {
+      if (lastSearchError) throw lastSearchError;
+      throw new Error('No encontré canciones para eso. Dímelo de otra forma, por ejemplo "pon corridos" o "pon Natanael Cano".');
+    }
     const playing = playUris(tracks.map((t) => t.uri));
     playing.catch(() => {});
     thinking.remove();
@@ -921,9 +946,9 @@ function friendlyError(e) {
   if (e.message === 'NO_LOGIN') return 'Necesito que me conectes a Spotify (Ajustes ⚙︎).';
   if (e.status === 429) return 'Hay muchas peticiones seguidas. Espera un minuto y vuelve a intentarlo.';
   if (e.status === 403 && /premium/i.test(e.message)) return 'Spotify pide Premium para controlar la reproducción.';
-  if (e.status === 403) return 'Spotify no me dejó hacer eso (403). Revisa que tu correo esté en "User Management" de tu app en Spotify for Developers.';
+  if (e.status === 403) return 'Spotify no me dejó (403: ' + e.message + '). Revisa en Spotify for Developers que tu correo esté en "User Management" de tu app.';
   if (e.status === 404 && /device/i.test(e.message)) return 'No encuentro Spotify activo. Abre Spotify en el iPhone, pon algo un segundo y vuelve a pedírmelo.';
-  return e.message || 'Algo falló.';
+  return e.status ? `Spotify dijo: ${e.message} (código ${e.status})` : (e.message || 'Algo falló.');
 }
 
 // ---------- Voz ----------
@@ -1042,7 +1067,9 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
+const VERSION = 'v4 · 18 nov';
 async function init() {
+  const v = document.getElementById('version'); if (v) v.textContent = VERSION;
   setupSettings();
   setupPlayer();
   setupMic();
