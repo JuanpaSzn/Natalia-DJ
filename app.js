@@ -245,8 +245,8 @@ function extractJson(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function gemini(prompt, useSearch) {
-  const { geminiKey, model } = settings();
+async function gemini(prompt, useSearch, model) {
+  const { geminiKey } = settings();
   const body = {
     systemInstruction: { parts: [{ text: SYSTEM }] },
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -269,14 +269,67 @@ async function gemini(prompt, useSearch) {
   return extractJson(parts.map((p) => p.text || '').join(''));
 }
 
-async function askDJ(userText) {
+// Si un modelo está saturado, probamos otros modelos gratis antes de rendirnos.
+const FALLBACK_MODELS = ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-2.5-flash-lite', 'gemini-2.5-flash'];
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const isKeyError = (e) => e.status === 401 || e.status === 403 || (e.status === 400 && /api key|API_KEY/i.test(e.message));
+
+async function askDJ(userText, onStatus) {
   const profile = store.get('profile', null) || await loadProfile(false);
   const prompt = buildPrompt(userText, profile);
-  if (TREND_WORDS.test(userText)) {
-    try { return await gemini(prompt, true); }
-    catch (e) { if (e.status === 401 || e.status === 403) throw e; /* sin búsqueda web: seguimos sin ella */ }
+  const models = [...new Set([settings().model, ...FALLBACK_MODELS].filter(Boolean))];
+  const wantsTrends = TREND_WORDS.test(userText);
+  let attempt = 0;
+  for (const model of models) {
+    const modes = wantsTrends ? [true, false] : [false];
+    for (const useSearch of modes) {
+      try {
+        return await gemini(prompt, useSearch, model);
+      } catch (e) {
+        if (isKeyError(e)) throw e;
+        attempt += 1;
+        if (onStatus) onStatus('La IA está ocupada, probando otra opción…');
+        await wait(Math.min(800 * attempt, 2500));
+      }
+    }
   }
-  return gemini(prompt, false);
+  return { fallback: true };
+}
+
+// Plan B sin IA: busca directo en Spotify con tu pedido y tu perfil.
+const FILLER = /\b(sofia|por favor|porfa|ponme|pon|reproduce|reproducir|quiero|escuchar|oir|oír|un|una|unos|unas|tema|temas|cancion|canción|canciones|musica|música|de|del|la|el|los|las|algo|me|mi|mis|que|y)\b/gi;
+
+async function fallbackTracks(userText) {
+  const profile = store.get('profile', null) || { artists: [], genres: [] };
+  const queries = [];
+  const cleaned = userText.replace(FILLER, ' ').replace(/\s+/g, ' ').trim();
+  const generic = /gust|descubr|sorpr|moda|nuev|g[eé]nero|motiv|relaj|clasic|clásic|viejit|antigu/i.test(userText);
+  const specific = cleaned && !generic;
+  if (specific) queries.push(cleaned, `artist:"${cleaned.replace(/"/g, '')}"`);
+  const shuffle = (a) => a.map((x) => [Math.random(), x]).sort((p, q) => p[0] - q[0]).map((p) => p[1]);
+  if (/descubr|sorpr|nuev|g[eé]nero|moda/i.test(userText)) {
+    shuffle(profile.genres).slice(0, 3).forEach((g) => queries.push(`genre:"${g}" year:2025-2026`));
+  }
+  if (!specific) shuffle(profile.artists).slice(0, 4).forEach((a) => queries.push(`artist:"${a}"`));
+  const m = memory();
+  const avoid = new Set([...m.disliked.map((x) => x.uri), ...m.suggested.slice(-150).map((x) => x.uri)]);
+  const out = [];
+  const seen = new Set();
+  for (const q of queries) {
+    try {
+      const r = await sp('/search', { query: { q, type: 'track', limit: 10 } });
+      const items = (r && r.tracks && r.tracks.items) || [];
+      let taken = 0;
+      for (const t of items) {
+        if (seen.has(t.uri) || (avoid.has(t.uri) && !specific)) continue;
+        seen.add(t.uri);
+        out.push({ uri: t.uri, id: t.id, label: `${t.artists.map((x) => x.name).join(', ')} - ${t.name}` });
+        if (++taken >= (specific ? 10 : 4)) break;
+      }
+    } catch { /* seguimos con la siguiente búsqueda */ }
+    if (out.length >= settings().count) break;
+  }
+  return shuffle(out.slice(1)).length ? [out[0], ...shuffle(out.slice(1))] : out;
 }
 
 // ---------- Buscar canciones en Spotify ----------
@@ -375,10 +428,12 @@ async function handleRequest(text) {
   pushHistory('user', text);
   const thinking = addMessage('sofia thinking', 'Escogiendo canciones…');
   try {
-    const answer = await askDJ(text);
+    const answer = await askDJ(text, (st) => { thinking.textContent = st; });
     const songs = Array.isArray(answer.canciones) ? answer.canciones : [];
-    const msg = String(answer.mensaje || '').trim() || 'Aquí va.';
-    if (!songs.length) {
+    const msg = answer.fallback
+      ? 'La IA de Google está saturada en este momento, así que te escogí música directo en Spotify. En un rato vuelve a pedírmelo y te armo algo más fino.'
+      : (String(answer.mensaje || '').trim() || 'Aquí va.');
+    if (!answer.fallback && !songs.length) {
       thinking.remove();
       addMessage('sofia', msg);
       pushHistory('sofia', msg);
@@ -386,7 +441,7 @@ async function handleRequest(text) {
       return;
     }
     thinking.textContent = 'Buscando las canciones en Spotify…';
-    const tracks = await resolveSongs(songs);
+    const tracks = answer.fallback ? await fallbackTracks(text) : await resolveSongs(songs);
     thinking.remove();
     if (!tracks.length) throw new Error('No encontré esas canciones en Spotify. Pídemelo de otra forma.');
     const bubble = addMessage('sofia', msg);
