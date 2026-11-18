@@ -9,7 +9,7 @@ const SCOPES = [
   'user-read-playback-state', 'user-modify-playback-state', 'user-read-currently-playing',
   'playlist-modify-private', 'playlist-modify-public',
 ].join(' ');
-const DEFAULT_COUNT = 15;
+const DEFAULT_COUNT = 25;
 const REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
 
 const store = {
@@ -25,7 +25,7 @@ const store = {
 
 const settings = () => ({
   clientId: store.get('clientId', ''),
-  count: Number(store.get('count', DEFAULT_COUNT)) || DEFAULT_COUNT,
+  count: (() => { const c = Number(store.get('count', DEFAULT_COUNT)) || DEFAULT_COUNT; return c === 15 ? DEFAULT_COUNT : c; })(),
 });
 
 const memory = () => store.get('memory', { suggested: [], loved: [], disliked: [] });
@@ -171,7 +171,7 @@ async function sp(path, { method = 'GET', body, query } = {}, retried = false, w
 
 // ---------- Perfil musical ----------
 // Lee tus artistas (con sus géneros) y tus canciones, y los agrupa por género.
-async function loadProfile(force) {
+async function loadProfile(force, silent) {
   const cached = store.get('profile2', null);
   if (!force && cached && Date.now() - cached.at < 12 * 3600 * 1000) return cached;
   const calls = await Promise.allSettled([
@@ -211,12 +211,14 @@ async function loadProfile(force) {
     tracks: Object.values(tracks).sort((a, b) => b.score - a.score),
     genres: Object.entries(genreScore).sort((a, b) => b[1] - a[1]).map(([g]) => g),
   };
+  classifyProfile(profile);
   store.set('profile2', profile);
-  if (force) {
-    const top = profile.artists.slice(0, 5).map((a) => a.name).join(', ') || 'todavía no tengo datos suficientes';
-    const g = profile.genres.slice(0, 4).join(', ');
-    addMessage('sofia', `Ya te conozco: escuchas mucho a ${top}${g ? `. Tus géneros fuertes: ${g}` : ''}. ¿Qué te pongo?`);
+  if (force && !silent) {
+    const sum = tasteSummary(profile);
+    addMessage('sofia', sum ? `Ya leí tus gustos. Lo que más escuchas:\n${sum}\n\n¿Qué te pongo?` : 'Ya estoy conectada, pero Spotify casi no me dio datos de lo que escuchas. Pídeme algo y voy aprendiendo con tus ❤.');
   }
+  // En segundo plano: averiguo el género de tus artistas que aún no conozco.
+  probeUnknownArtists(profile).catch(() => {});
   return profile;
 }
 
@@ -239,7 +241,7 @@ const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-
 // "fam" agrupa géneros parecidos y "pl" es el nombre de la playlist cuando organiza tus Me gusta.
 // Van de lo más específico a lo más general.
 const GENRE_ALIASES = [
-  { re: /corridos? belicos?|belicos?/, label: 'corridos bélicos', genres: ['corridos belicos', 'corrido'], fam: 'mexicano', pl: 'Corridos' },
+  { re: /corridos? belic(o|os|on|ones|ote|otes)|belic(o|os|on|ones)|belikon\w*/, label: 'corridos bélicos', genres: ['corridos belicos', 'corrido'], fam: 'mexicano', pl: 'Corridos' },
   { re: /corridos? tumbados?|tumbados?/, label: 'corridos tumbados', genres: ['corridos tumbados', 'corrido'], fam: 'mexicano', pl: 'Corridos' },
   { re: /corridos?/, label: 'corridos', genres: ['corridos tumbados', 'corrido', 'corridos belicos'], fam: 'mexicano', pl: 'Corridos' },
   { re: /sierren[oa]s?/, label: 'sierreño', genres: ['sierreno'], fam: 'mexicano', pl: 'Corridos' },
@@ -341,6 +343,8 @@ const RX = {
   relax: /relaj|tranquil|calm|dormir|descansar|suave|chill|estudiar|concentr/,
   motiv: /motiv|gym|gimnasio|entren|ejercicio|pesas|correr|animo|echarle ganas|dar todo/,
   similar: /parecid|similar|como (a )?|estilo de|tipo /,
+  deep: /menos (escuchad|conocid|famos|sonad|popular|pegad)|rarezas|no tan (conocid|famos|sonad|pegad)|joyitas?|joyas|underrated|ocultas|casi nadie|poca gente|pocos (han )?escuch|poco (escuchad|conocid|sonad)|nadie conoce|b ?sides/,
+  popular: /popular|famos|exitos|hits|mejores|mas escuchad|mas sonad|pegadit|pegad[oa]s|temazos|\btop\b/,
   country: /que se escucha|escuchando en|suena en|sonando en|pegado en|top (de )?|en colombia|en puerto|en mexico|en espana|en argentina|en republica|en estados/,
   organize: /(organiz|orden|clasific|divid|separ|acomod)\w*.*(me gusta|megusta|favorit|likes|gustad|guardad|biblioteca)/,
 };
@@ -351,25 +355,34 @@ const COMMANDS = [
   { re: /^(me gusta esta|me encanta esta|guardala|guarda esta|me gusto|me encanto)$/, run: () => rate(true), say: '' },
   { re: /^(no me gusta|no me gusta esta|quita esta|quitala|esta no|no me gusto)$/, run: () => rate(false), say: '' },
 ];
-const FILLER = /\b(sofia|sofi|ve|oye|hola|por favor|porfa|ponme|pon|ponga|pongas|reproduce|reproducir|quiero|quisiera|escuchar|oir|un|una|unos|unas|tema|temas|cancion|canciones|musica|de|del|la|el|los|las|algo|me|mi|mis|que|y|en|con|a|al|hoy|ahora|solo|puro|pura|puros|full|mas|otra|otras|otro|otros|bien|tipo|artistas?|parecid[oa]s?|similares?|estilo|como|recomiendame|recomienda|recomendar|dame|music|gente|esta|estan|estos|dias|escuchando|escucha|suena|sonando|pais)\b/g;
+const FILLER = /\b(parce|parcero|parcera|mano|bro|llave|pana|pa|socio|hermano|rolas?|rolitas?|temazos?|temitas?|cancioncitas?|chimba|bacan[oa]s?|melo|ome|pues|vea|mijo|mija|nea|pero|sean|sea|casi|nadie|haya|hayan|escuchado|conocido|gente|poca|pocos|porfis|plis|please|sofia|sofi|ve|oye|hola|por favor|porfa|ponme|pon|ponga|pongas|reproduce|reproducir|quiero|quisiera|escuchar|oir|un|una|unos|unas|tema|temas|cancion|canciones|musica|de|del|la|el|los|las|algo|me|mi|mis|que|y|en|con|a|al|hoy|ahora|solo|puro|pura|puros|full|mas|otra|otras|otro|otros|bien|tipo|artistas?|parecid[oa]s?|similares?|estilo|como|recomiendame|recomienda|recomendar|dame|music|gente|esta|estan|estos|dias|escuchando|escucha|suena|sonando|pais)\b/g;
 const STOP_STEM = /^(moda|nuev|tendenc|recient|estren|actual|momento|pegand|viral|lanzamient|viej|antigu|clasic|descubr|sorprend|nunca|conozc|escuchad|distint|genero|gust|favorit|relaj|tranquil|dormir|descans|motiv|energ|entren|ejercic|fiesta|rumba|prend|parche|parecid|similar|estilo|recomiend|ingles|espanol|siempre|sesion|playlist|ponme|sofia|gimnas|concentr|estudi|semana|escuch|oig)/;
-const STOP_EXACT = new Set(['pon', 'no', 'nada', 'todo', 'esa', 'eso', 'este', 'lo', 'le', 'se', 'su', 'sus', 'para', 'haya', 'antes', 'old', 'school', 'dj', 'lista', 'calma', 'calmada', 'suave', 'chill', 'gym', 'activa', 'activo', 'activarme', 'totalmente', 'diferente', 'gym', 'pesas', 'correr', 'animo', 'top']);
+const STOP_EXACT = new Set(['pon', 'no', 'nada', 'todo', 'esa', 'eso', 'este', 'lo', 'le', 'se', 'su', 'sus', 'para', 'haya', 'antes', 'old', 'school', 'dj', 'lista', 'calma', 'calmada', 'suave', 'chill', 'gym', 'activa', 'activo', 'activarme', 'totalmente', 'diferente', 'gym', 'pesas', 'correr', 'animo', 'top', 'he', 'ha', 'has', 'yo', 'ya', 'menos', 'rarezas', 'joyitas', 'ocultas', 'populares', 'popular', 'famosas', 'famosos', 'exitos', 'hits', 'mejores', 'sonadas', 'conocidas', 'joyas', 'joyita', 'joyitas', 'unas', 'bueno', 'buenas', 'buenos', 'chimbas', 'duro', 'durisimo', 'brutal']);
 
+// El género solo cuenta si la palabra termina ahí ("corridos belicones" no es "corridos belico" + "nes").
+const ALIAS_RX = new Map(GENRE_ALIASES.map((g) => [g, new RegExp('(?:' + g.re.source + ')(?![a-z])')]));
 function interpret(text) {
   const t = norm(text);
   let genre = null;
   let rest = t;
   for (const g of GENRE_ALIASES) {
-    if (g.re.test(t)) { genre = g; rest = rest.replace(g.re, ' '); break; }
+    const rx = ALIAS_RX.get(g);
+    if (rx.test(t)) { genre = g; rest = rest.replace(rx, ' '); break; }
   }
   const country = COUNTRIES.find((c) => c.re.test(t)) || null;
   if (country) rest = rest.replace(country.re, ' ');
   const mode = {};
   Object.keys(RX).forEach((k) => { mode[k] = RX[k].test(t); });
   if (mode.newGenre) mode.discover = true;
-  rest = rest.replace(FILLER, ' ').split(' ').filter((w) => w && !STOP_EXACT.has(w) && !STOP_STEM.test(w)).join(' ');
+  if (mode.deep) mode.popular = false;
+  mode.raw = t;
+  // Varios artistas: "Luis R Conriquez y Natanael Cano", "Feid, Blessd".
+  const parts = rest.replace(/ (y|e|and|junto con|con|mezclado con|mezcla de) |,/g, ' | ').split('|')
+    .map((p) => p.replace(FILLER, ' ').split(' ').filter((w) => w && !STOP_EXACT.has(w) && !STOP_STEM.test(w)).join(' '))
+    .filter((p) => p.length >= 2);
+  rest = parts.join(' ');
   const artistQuery = rest.length >= 2 && !mode.likes ? rest : '';
-  return { t, genre, mode, country, artistQuery };
+  return { t, genre, mode, country, artistQuery, artistParts: mode.likes ? [] : parts };
 }
 
 const yearFilter = (mode) => {
@@ -414,11 +427,23 @@ async function findArtist(name) {
     const items = (r && r.artists && r.artists.items) || [];
     const n = norm(name);
     const exact = items.find((a) => norm(a.name) === n);
-    const close = items.find((a) => norm(a.name).startsWith(n) || n.startsWith(norm(a.name)));
+    const close = items.find((a) => norm(a.name).startsWith(n) || n.startsWith(norm(a.name)))
+      || items.find((a) => similarity(norm(a.name), n) >= 0.75);
     const best = exact || close || items[0] || null;
-    if (best) { rememberGenres(best.id, best.genres); best.exact = !!(exact || close); }
+    if (best) { rememberGenres(best.id, best.genres); best.exact = !!(exact || close); best.sim = similarity(norm(best.name), n); }
     return best;
   } catch { return null; }
+}
+
+// Parecido entre dos textos (0 a 1), para entender nombres mal escritos: "Naranel Cano" = Natanael Cano.
+function similarity(a, b) {
+  if (!a || !b) return 0;
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  }
+  return 1 - d[a.length][b.length] / Math.max(a.length, b.length);
 }
 
 // Junta varias búsquedas en paralelo (todas a la vez: así tarda lo que tarda la más lenta).
@@ -469,13 +494,173 @@ function rememberGenres(id, genres) {
   store.set('artistGenres', c);
 }
 
-// Cuánto escuchas cada género (según tus artistas) y cuánto te gustó con ❤ / 👎.
+// ---------- Tus gustos: a qué género pertenece cada artista ----------
+// Spotify ya no dice el género de los artistas, así que SOFIA lo averigua con:
+// 1) esta lista de artistas conocidos, 2) lo que aprende de cada búsqueda por género,
+// 3) con quién colaboran tus artistas, y 4) preguntándole a Spotify por género (una sola vez).
+const ARTIST_SEEDS = {
+  'corridos tumbados': ['Natanael Cano', 'Peso Pluma', 'Junior H', 'Fuerza Regida', 'Gabito Ballesteros', 'Tito Double P', 'Xavi', 'Ivan Cornejo', 'Eslabon Armado', 'Oscar Maydon', 'Chino Pacas', 'Dannylux', 'Jasiel Nuñez', 'Herencia de Grandes', 'Grupo Marca Registrada', 'Neton Vega', 'Luis R Conriquez', 'Hernan Lopez', 'Victor Mendivil', 'Alemán', 'Dareyes De La Sierra'],
+  'corridos bélicos': ['Luis R Conriquez', 'Kevin AMF', 'Grupo Arriesgado', 'El Makabelico', 'Gerardo Coronel', 'Clave Especial', 'Los Gemelos de Sinaloa', 'Alfredo Olivas', 'Calle 24', 'Hector Rubio', 'Los Dareyes de la Sierra', 'Jesús Ortiz Paz'],
+  'regional mexicano': ['Grupo Frontera', 'Carin Leon', 'Christian Nodal', 'Banda MS de Sergio Lizárraga', 'Calibre 50', 'Julión Álvarez y su Norteño Banda', 'La Arrolladora Banda El Limón De Rene Camacho', 'Grupo Firme', 'Los Tigres Del Norte', 'Ángela Aguilar', 'Vicente Fernández', 'Gerardo Ortiz', 'El Fantasma', 'Edén Muñoz', 'Pepe Aguilar'],
+  'reguetón': ['Bad Bunny', 'Karol G', 'Feid', 'J Balvin', 'Daddy Yankee', 'Ozuna', 'Rauw Alejandro', 'Maluma', 'Myke Towers', 'Jhayco', 'Blessd', 'Ryan Castro', 'Wisin & Yandel', 'Don Omar', 'Nicky Jam', 'Farruko', 'Sech', 'Young Miko', 'Kapo', 'Beéle', 'Manuel Turizo', 'Lunay', 'Justin Quiles', 'Dalex', 'Zion & Lennox', 'Plan B', 'Tito El Bambino', 'Arcángel', 'De La Ghetto', 'Ñengo Flow', 'Kevvo', 'Dei V', 'Omar Courtz', 'Reykon', 'Lenny Tavárez', 'Mora', 'Brray', 'Jowell & Randy', 'Hector El Father', 'Tego Calderón'],
+  'trap latino': ['Anuel AA', 'Eladio Carrión', 'Bryant Myers', 'Kris R', 'Pirlo', 'Duki', 'Myke Towers', 'Almighty', 'Lito Kirino', 'Noriel', 'Ele A El Dominio', 'Hades66', 'Yan Block', 'Quevedo', 'Rels B', 'Trueno', 'Milo J', 'Tiago PZK', 'Paulo Londra', 'Khea', 'Jon Z', 'Alex Rose', 'Juhn', 'YOVNGCHIMI', 'Polimá Westcoast', 'Pablo Chill-E', 'Marcianeke', 'Cris MJ', 'Ovi', 'Natos y Waor', 'Morad', 'Beny Jr', 'Nicki Nicole', 'Bizarrap', 'Saiko', 'JC Reyes', 'Luar La L', 'Mora', 'Arcángel', 'Bad Gyal', 'Gotay "El Autentiko"'],
+  'rap': ['Eminem', 'Drake', 'Kendrick Lamar', 'Travis Scott', 'Kanye West', 'J. Cole', '50 Cent', 'Future', 'Lil Wayne', 'Jay-Z', 'Snoop Dogg', 'Dr. Dre', 'Tyler, The Creator', 'Lil Baby', 'A$AP Rocky', 'Post Malone', 'Juice WRLD', 'XXXTENTACION', 'Mac Miller', 'Playboi Carti', 'Metro Boomin', '21 Savage', 'Lil Uzi Vert', 'Nicki Minaj', 'Cardi B', 'Doechii', 'Gunna', 'Young Thug', 'DMX', 'Tupac', 'The Notorious B.I.G.', 'Pop Smoke', 'Central Cee', 'Don Toliver', 'Lil Nas X', 'Polo G', 'NF', 'Logic', 'Macklemore', 'Fort Minor'],
+  'rap en español': ['Canserbero', 'Residente', 'Calle 13', 'Nach', 'Kase.O', 'Akapellah', 'Gera MX', 'Santa RM', 'Alemán', 'Cartel de Santa', 'C-Kan', 'Porta', 'Ac Mafia', 'Arianna Puello', 'Rapper School'],
+  'R&B': ['The Weeknd', 'SZA', 'Frank Ocean', 'Chris Brown', 'Usher', 'Bryson Tiller', 'Daniel Caesar', 'Summer Walker', 'H.E.R.', 'Brent Faiyaz', 'Khalid', 'Giveon', 'Jhené Aiko', 'Alicia Keys', 'Beyoncé', 'Rihanna', '6LACK', 'Tinashe', 'Kehlani', 'Ne-Yo'],
+  'vallenato': ['Diomedes Díaz', 'Silvestre Dangond', 'Jorge Celedón', 'Carlos Vives', 'Peter Manjarrés', 'Los Diablitos', 'Binomio de Oro de América', 'Martín Elías', 'Poncho Zuleta', 'Iván Villazón', 'Felipe Peláez', 'Los Inquietos del Vallenato', 'Otto Serge'],
+  'champeta': ['Mr. Black El Presidente', 'Kevin Flórez', 'El Afinaito', 'Zaider', 'Charles King', 'Louis Towers', 'Twister El Rey'],
+  'salsa': ['Marc Anthony', 'Héctor Lavoe', 'Willie Colón', 'Rubén Blades', 'Grupo Niche', 'Joe Arroyo', 'Frankie Ruiz', 'Gilberto Santa Rosa', 'Celia Cruz', 'Oscar D\'León', 'Victor Manuelle', 'Jerry Rivera', 'Eddie Santiago', 'Fruko Y Sus Tesos', 'Guayacán Orquesta', 'La Sonora Ponceña', 'Tito Rojas', 'El Gran Combo De Puerto Rico'],
+  'bachata': ['Romeo Santos', 'Aventura', 'Prince Royce', 'Juan Luis Guerra 4.40', 'Anthony Santos', 'Frank Reyes', 'Zacarías Ferreira', 'Raulin Rodriguez', 'Toby Love', 'Grupo Extra', 'Monchy & Alexandra', 'Luis Vargas', 'Elvis Martinez'],
+  'merengue': ['Juan Luis Guerra 4.40', 'Elvis Crespo', 'Wilfrido Vargas', 'Johnny Ventura', 'Sergio Vargas', 'Fernando Villalona', 'Eddy Herrera', 'Los Hermanos Rosario', 'Kinito Mendez'],
+  'cumbia': ['Los Ángeles Azules', 'Grupo Kual?', 'Los Askis', 'Celso Piña', 'Agua Marina', 'Grupo 5', 'Corazón Serrano', 'La Sonora Dinamita', 'Rodolfo Aicardi', 'Damas Gratis', 'Los Palmeras', 'Ráfaga', 'Américo', 'Los Mirlos'],
+  'RKT': ['L-Gante', 'El Noba', 'Callejero Fino', 'La T y La M', 'Damas Gratis', 'Dj Tao', 'Rusherking', 'Luck Ra', 'Ke Personajes', 'La K\'onga', 'Q\' Lokura'],
+  'música popular': ['Jhon Alex Castaño', 'Jessi Uribe', 'Paola Jara', 'Pipe Bueno', 'Yeison Jiménez', 'Luis Alberto Posada', 'Darío Gómez', 'Pipe Bueno', 'Francy', 'Arelys Henao', 'Giovanny Ayala', 'Galy Galiano', 'Jhonny Rivera', 'El Charrito Negro'],
+  'música cristiana': ['Marcos Witt', 'Jesús Adrián Romero', 'Hillsong en Español', 'Barak', 'Marco Barrientos', 'Christine D\'Clario', 'Miel San Marcos', 'Evan Craft', 'Redimi2', 'Alex Campos', 'Ingrid Rosario', 'Danilo Montero', 'Elevation Worship', 'Hillsong Worship', 'Bethel Music', 'Maverick City Music', 'Lauren Daigle', 'Montesanto', 'Su Presencia', 'Generación 12'],
+  'hard techno': ['I Hate Models', 'Trym', 'Klangkuenstler', 'Kobosil', 'Nico Moreno', 'VTSS', 'Sara Landry', 'Charlie Sparks', 'Dax J', 'Alignment', 'Shlømo', 'Funk Tribu', '999999999', 'Fantasm'],
+  'industrial': ['Rammstein', 'Nine Inch Nails', 'Ministry', 'Front 242', 'KMFDM', 'Surgeon', 'Perc', 'Ancient Methods', 'Rabih Beaini', 'Orphx'],
+  'techno': ['Charlotte de Witte', 'Amelie Lens', 'Adam Beyer', 'Richie Hawtin', 'Carl Cox', 'Enrico Sangiuliano', 'Reinier Zonneveld', 'Boris Brejcha', 'ANNA', 'Stephan Bodzin', 'Ben Klock', 'Jeff Mills'],
+  'house': ['Fisher', 'Chris Lake', 'John Summit', 'Dom Dolla', 'Fred again..', 'Disclosure', 'Calvin Harris', 'Purple Disco Machine', 'Peggy Gou', 'MK', 'Chris Lorenzo', 'Vintage Culture', 'Meduza', 'Mau P'],
+  'afro house': ['Black Coffee', 'Keinemusik', '&ME', 'Adam Port', 'Rampa', 'Themba', 'Enoo Napa', 'Da Capo'],
+  'electrónica': ['David Guetta', 'Martin Garrix', 'Avicii', 'Tiësto', 'Alesso', 'Hardwell', 'Swedish House Mafia', 'Zedd', 'Kygo', 'Marshmello', 'Alan Walker', 'Steve Aoki', 'Skrillex', 'Afrojack', 'Don Diablo'],
+  'drum and bass': ['Chase & Status', 'Sub Focus', 'Netsky', 'Pendulum', 'Wilkinson', 'Andy C', 'Hybrid Minds', 'Camo & Krooked', 'Dimension', 'Sota'],
+  'dubstep': ['Excision', 'Subtronics', 'Skrillex', 'Virtual Riot', 'Zeds Dead', 'Svdden Death', 'Marauda', 'Kai Wachi'],
+  'trance': ['Armin van Buuren', 'Above & Beyond', 'Paul van Dyk', 'Ferry Corsten', 'Aly & Fila', 'Gareth Emery', 'Cosmic Gate'],
+  'hardstyle': ['Headhunterz', 'Da Tweekaz', 'Sub Zero Project', 'D-Block & S-te-Fan', 'Brennan Heart', 'Wildstylez', 'Rebelion'],
+  'phonk': ['Kordhell', 'DVRST', 'MoonDeity', 'INTERWORLD', 'PlayaPhonk', 'Ghostface Playa', 'Pastel Ghost', 'NCTS', 'Hensonn', 'Dxrk ダーク'],
+  'metal': ['Metallica', 'Slipknot', 'System Of A Down', 'Iron Maiden', 'Megadeth', 'Pantera', 'Korn', 'Avenged Sevenfold', 'Black Sabbath', 'Slayer', 'Gojira', 'Disturbed'],
+  'metalcore': ['Bring Me The Horizon', 'Architects', 'Parkway Drive', 'Killswitch Engage', 'Bullet For My Valentine', 'Asking Alexandria', 'Spiritbox', 'Of Mice & Men', 'Wage War'],
+  'punk': ['Green Day', 'Blink-182', 'The Offspring', 'Sum 41', 'Ramones', 'Rise Against', 'Bad Religion', 'Social Distortion', 'Sex Pistols'],
+  'rock en español': ['Soda Stereo', 'Caifanes', 'Maná', 'Héroes Del Silencio', 'Enanitos Verdes', 'Los Prisioneros', 'Café Tacvba', 'Zoé', 'Aterciopelados', 'Los Fabulosos Cadillacs', 'Gustavo Cerati', 'Molotov', 'El Tri', 'Hombres G', 'Babasónicos', 'Los Bunkers'],
+  'rock': ['Queen', 'AC/DC', 'Guns N\' Roses', 'Nirvana', 'Linkin Park', 'Red Hot Chili Peppers', 'Foo Fighters', 'Arctic Monkeys', 'The Beatles', 'Led Zeppelin', 'The Rolling Stones', 'Pink Floyd', 'Bon Jovi', 'Imagine Dragons', 'Muse', 'Pearl Jam', 'The Killers', 'Coldplay', 'Radiohead', 'Oasis', 'Twenty One Pilots', 'Fall Out Boy', 'Paramore', 'My Chemical Romance', 'Evanescence', 'Three Days Grace', 'Papa Roach', 'Breaking Benjamin', 'Shinedown', 'Creedence Clearwater Revival'],
+  'indie': ['Tame Impala', 'The Strokes', 'Arctic Monkeys', 'Mac DeMarco', 'Cage The Elephant', 'Vampire Weekend', 'Phoenix', 'Hozier', 'Mitski', 'Cigarettes After Sex', 'The Neighbourhood', 'Glass Animals', 'Hippo Campus', 'Wallows', 'Clairo'],
+  'baladas': ['Luis Miguel', 'Ricardo Arjona', 'Alejandro Sanz', 'Camilo Sesto', 'José José', 'Juan Gabriel', 'Ricardo Montaner', 'Laura Pausini', 'Franco De Vita', 'Chayanne', 'Cristian Castro', 'Marco Antonio Solís', 'Rocío Dúrcal', 'Ana Gabriel', 'Reik', 'Sin Bandera', 'Camila', 'Jesse & Joy', 'Pablo Alborán', 'Franco de Vita'],
+  'pop latino': ['Shakira', 'Sebastián Yatra', 'Camilo', 'Morat', 'Carlos Vives', 'Enrique Iglesias', 'Ricky Martin', 'Juanes', 'Thalía', 'Paulina Rubio', 'Aitana', 'TINI', 'Danny Ocean', 'Piso 21', 'Cami', 'Reik', 'Mau y Ricky', 'Emilia', 'Nicky Jam', 'Lali'],
+  'K-pop': ['BTS', 'BLACKPINK', 'Stray Kids', 'TWICE', 'NewJeans', 'SEVENTEEN', 'ATEEZ', 'aespa', 'LE SSERAFIM', 'IVE', 'Jung Kook', 'ROSÉ', 'Jimin', 'EXO', 'ENHYPEN', 'TXT', 'ITZY', 'BIGBANG', 'Red Velvet'],
+  'J-pop': ['YOASOBI', 'Kenshi Yonezu', 'Ado', 'LiSA', 'Official HIGE DANdism', 'Fujii Kaze', 'Aimer', 'King Gnu', 'RADWIMPS', 'Mrs. GREEN APPLE', 'Vaundy', 'Eve'],
+  'pop': ['Taylor Swift', 'Dua Lipa', 'Ed Sheeran', 'Ariana Grande', 'Billie Eilish', 'Harry Styles', 'Olivia Rodrigo', 'Bruno Mars', 'Justin Bieber', 'Sabrina Carpenter', 'Lady Gaga', 'Katy Perry', 'Miley Cyrus', 'Selena Gomez', 'Shawn Mendes', 'Charli xcx', 'Chappell Roan', 'Tate McRae', 'Doja Cat', 'Benson Boone', 'Maroon 5', 'OneRepublic', 'Sia', 'Halsey', 'Lana Del Rey', 'Adele', 'Sam Smith', 'Lewis Capaldi', 'Teddy Swims', 'Gracie Abrams'],
+  'jazz': ['Miles Davis', 'John Coltrane', 'Louis Armstrong', 'Ella Fitzgerald', 'Chet Baker', 'Bill Evans', 'Dave Brubeck', 'Thelonious Monk', 'Norah Jones', 'Herbie Hancock', 'Nina Simone', 'Billie Holiday', 'Frank Sinatra'],
+  'soul y funk': ['Marvin Gaye', 'Stevie Wonder', 'Aretha Franklin', 'James Brown', 'Earth, Wind & Fire', 'Al Green', 'Otis Redding', 'Sam Cooke', 'Bill Withers', 'Kool & The Gang', 'Prince', 'Leon Bridges', 'Anderson .Paak', 'Erykah Badu', 'D\'Angelo'],
+  'blues': ['B.B. King', 'Muddy Waters', 'Stevie Ray Vaughan', 'John Lee Hooker', 'Howlin\' Wolf', 'Etta James', 'Gary Clark Jr.', 'Buddy Guy', 'Eric Clapton', 'Joe Bonamassa'],
+  'lo-fi': ['Lofi Fruits Music', 'Chillhop Music', 'Lofi Girl', 'Kupla', 'Idealism', 'Nujabes', 'Tomppabeats', 'Jinsang', 'eevee', 'Philanthrope', 'Saib', 'potsu', 'Wun Two'],
+  'ambient': ['Brian Eno', 'Ólafur Arnalds', 'Nils Frahm', 'Max Richter', 'Hammock', 'Tycho', 'Marconi Union', 'Jon Hopkins', 'Stars Of The Lid', 'Hania Rani'],
+  'reggae': ['Bob Marley & The Wailers', 'Damian Marley', 'Peter Tosh', 'Sean Paul', 'Shaggy', 'UB40', 'Chronixx', 'Koffee', 'Protoje', 'Gondwana', 'Alborosie', 'Rebelution', 'SOJA', 'Stick Figure', 'Dread Mar I', 'Los Cafres'],
+  'afrobeats': ['Burna Boy', 'Wizkid', 'Rema', 'Davido', 'Tems', 'Asake', 'Ayra Starr', 'CKay', 'Fireboy DML', 'Omah Lay', 'Tyla', 'Joeboy', 'Kizz Daniel', 'Victony', 'Uncle Waffles'],
+  'funk brasileño': ['MC Kevinho', 'Anitta', 'MC Ryan SP', 'Ludmilla', 'MC IG', 'MC Cabelinho', 'Pedro Sampaio', 'MC Hariel', 'MC Livinho', 'Kevin O Chris', 'DJ GBR', 'MC Daniel'],
+  'bossa nova': ['João Gilberto', 'Antônio Carlos Jobim', 'Astrud Gilberto', 'Stan Getz', 'Vinicius de Moraes', 'Sérgio Mendes', 'Bebel Gilberto', 'Elis Regina', 'Caetano Veloso', 'Gilberto Gil', 'Marisa Monte', 'Seu Jorge'],
+  'country': ['Morgan Wallen', 'Luke Combs', 'Zach Bryan', 'Chris Stapleton', 'Kane Brown', 'Jason Aldean', 'Luke Bryan', 'Johnny Cash', 'Dolly Parton', 'Shaboozey', 'Lainey Wilson', 'Carrie Underwood', 'Kenny Chesney', 'Blake Shelton', 'Tim McGraw'],
+  'música clásica': ['Ludwig van Beethoven', 'Wolfgang Amadeus Mozart', 'Johann Sebastian Bach', 'Frédéric Chopin', 'Antonio Vivaldi', 'Pyotr Ilyich Tchaikovsky', 'Claude Debussy', 'Erik Satie', 'Ludovico Einaudi', 'Hans Zimmer', 'Yiruma'],
+  'flamenco': ['Paco de Lucía', 'Camarón de la Isla', 'Rosalía', 'Niña Pastori', 'Diego El Cigala', 'Estrella Morente', 'Vicente Amigo', 'Tomatito', 'Ketama', 'Gipsy Kings', 'Rocío Márquez'],
+  'tango': ['Carlos Gardel', 'Astor Piazzolla', 'Gotan Project', 'Bajofondo', 'Juan D\'Arienzo', 'Aníbal Troilo', 'Osvaldo Pugliese', 'Julio Sosa', 'Otros Aires'],
+  'dembow': ['El Alfa', 'Rochy RD', 'Bulin 47', 'Chimbala', 'Tokischa', 'Kiko El Crazy', 'Donaty', 'Yaisel LM', 'Haraca Kiko', 'Ceky Viciny', 'Shelow Shaq', 'La Perversa', 'Black Jonas Point', 'Braulio Fogon'],
+  'drill': ['Pop Smoke', 'Central Cee', 'Headie One', 'Digga D', 'Fivio Foreign', 'Kay Flock', 'Unknown T', 'Russ Millions', 'Sheff G', 'Ice Spice'],
+  'sierreño': ['Ivan Cornejo', 'Eslabon Armado', 'Jasiel Nuñez', 'DannyLux', 'Luis R Conriquez', 'Arsenal Efectivo', 'Los Elegantes de Jerez'],
+};
+
+// Nombre normalizado -> género de SOFIA.
+const SEED_INDEX = (() => {
+  const idx = {};
+  Object.entries(ARTIST_SEEDS).forEach(([label, names]) => names.forEach((n) => {
+    const k = norm(n);
+    if (!idx[k]) idx[k] = label;
+  }));
+  return idx;
+})();
+
+// Lo que SOFIA ya aprendió: id de artista -> género (se va llenando sola con cada búsqueda por género).
+function learnedAliases() { return store.get('artistAlias', {}); }
+function learnAliases(pairs) {
+  if (!pairs.length) return;
+  const c = learnedAliases();
+  pairs.forEach(([id, label]) => { if (id && label && !c[id]) c[id] = label; });
+  const keys = Object.keys(c);
+  if (keys.length > 6000) keys.slice(0, keys.length - 6000).forEach((k) => delete c[k]);
+  store.set('artistAlias', c);
+}
+
+// El género de un artista ({id, name, genres}), o null si aún no se sabe.
+function aliasOfArtist(a, extra) {
+  if (!a) return null;
+  if (extra && extra[a.id]) return aliasByLabel(extra[a.id]);
+  const learned = learnedAliases()[a.id];
+  if (learned) return aliasByLabel(learned);
+  const fromSpotify = aliasOfArtistGenres(a.genres);
+  if (fromSpotify) return fromSpotify;
+  const seed = SEED_INDEX[norm(a.name)];
+  return seed ? aliasByLabel(seed) : null;
+}
+
+// Arma el mapa de géneros de tu perfil: lista + colaboraciones (si un artista que no conozco
+// colabora con uno de corridos, seguramente es de corridos).
+function classifyProfile(profile) {
+  const map = {};
+  profile.artists.forEach((a) => { const al = aliasOfArtist(a); if (al) map[a.id] = al.label; });
+  const nameOf = {};
+  profile.artists.forEach((a) => { nameOf[a.id] = a.name; });
+  for (let round = 0; round < 2; round++) {
+    profile.tracks.forEach((t) => {
+      const known = t.artistIds.map((id, i) => map[id] || (aliasOfArtist({ id, name: t.artists[i] }) || {}).label).find(Boolean);
+      if (!known) return;
+      t.artistIds.forEach((id, i) => {
+        if (!map[id]) {
+          const own = aliasOfArtist({ id, name: t.artists[i] });
+          map[id] = own ? own.label : known;
+        }
+      });
+    });
+  }
+  // Artistas de tus canciones que no estaban en tu top: también cuentan.
+  profile.tracks.forEach((t) => t.artistIds.forEach((id, i) => {
+    if (!profile.artists.find((a) => a.id === id)) {
+      profile.artists.push({ id, name: t.artists[i], genres: [], score: Math.round((t.score || 10) / 2) });
+    }
+  }));
+  profile.aliasOf = map;
+  return profile;
+}
+
+// Para los artistas que todavía no sé, le pregunto a Spotify "¿este artista es de este género?".
+async function probeUnknownArtists(profile) {
+  const unknown = profile.artists.filter((a) => !profile.aliasOf[a.id]).sort((a, b) => b.score - a.score).slice(0, 12);
+  if (!unknown.length) return profile;
+  const taste = tasteByGenre(profile);
+  const candidates = [...new Set([...Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 3), 'corridos tumbados', 'reguetón', 'trap latino', 'rap'])].slice(0, 5).map(aliasByLabel).filter(Boolean);
+  const jobs = [];
+  unknown.forEach((a) => candidates.forEach((al) => jobs.push([a, al])));
+  const found = {};
+  await pool(jobs, 4, async ([a, al]) => {
+    if (found[a.id]) return;
+    try {
+      const r = await sp('/search', { query: { q: `artist:"${a.name}" genre:"${al.genres[0]}"`, type: 'track', limit: 1 } });
+      const t = r && r.tracks && r.tracks.items && r.tracks.items[0];
+      if (t && t.artists.some((x) => x.id === a.id)) found[a.id] = al.label;
+    } catch { /* sin respuesta: lo dejamos sin género */ }
+  });
+  learnAliases(Object.entries(found));
+  Object.assign(profile.aliasOf, found);
+  store.set('profile2', profile);
+  return profile;
+}
+
+// Resumen corto de tus gustos, para que veas que SOFIA te conoce.
+function tasteSummary(profile) {
+  const taste = tasteByGenre(profile);
+  const top = Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 4);
+  if (!top.length) return '';
+  return top.map((label) => {
+    const names = profile.artists.filter((a) => profile.aliasOf[a.id] === label).sort((a, b) => b.score - a.score).slice(0, 3).map((a) => a.name);
+    return `• ${label}${names.length ? ': ' + names.join(', ') : ''}`;
+  }).join('\n');
+}
+
+// Cuánto escuchas cada género (tus artistas + lo que me has pedido).
 function tasteByGenre(profile) {
   const score = {};
+  const map = profile.aliasOf || {};
   profile.artists.forEach((a) => {
-    const al = aliasOfArtistGenres(a.genres);
-    if (al) score[al.label] = (score[al.label] || 0) + a.score;
+    const label = map[a.id] || (aliasOfArtist(a) || {}).label;
+    if (label) score[label] = (score[label] || 0) + a.score;
   });
+  Object.entries(memory().asked || {}).forEach(([l, n]) => { if (aliasByLabel(l)) score[l] = (score[l] || 0) + n * 15; });
   return score;
 }
 const feedback = () => memory().genres || {};
@@ -490,11 +675,11 @@ function heardUris(profile) {
   ]);
 }
 
-function avoidFor(profile, strict) {
+function avoidFor(profile, strict, recent = 80) {
   const m = memory();
   const uris = new Set(m.disliked.map((x) => x.uri));
   if (strict) heardUris(profile).forEach((u) => uris.add(u));
-  else m.suggested.slice(-80).forEach((x) => uris.add(x.uri));
+  else if (recent) m.suggested.slice(-recent).forEach((x) => uris.add(x.uri));
   const artists = new Set(Object.entries(m.artists || {}).filter(([, s]) => s <= -2).map(([id]) => id));
   return { uris, artists };
 }
@@ -507,21 +692,27 @@ async function genreSession(alias, mode, profile, { market, newGenre } = {}) {
   const known = new Set(profile.artists.map((a) => a.id));
   const base = discover ? 10 + rnd(4) * 10 : rnd(3) * 10;
   const [g1, g2] = alias.genres;
-  const qs = [[`genre:"${g1}"${yf}`, base], [`genre:"${g1}"${yf}`, base + 10], [`genre:"${g1}"${yf}`, base + 20]];
+  const qs = [[`genre:"${g1}"${yf}`, base], [`genre:"${g1}"${yf}`, base + 10], [`genre:"${g1}"${yf}`, base + 20], [`genre:"${g1}"${yf}`, base + 30]];
   if (g2) qs.push([`genre:"${g2}"${yf}`, base], [`genre:"${g2}"${yf}`, base + 10]);
   if (discover) qs.push([`genre:"${g1}"${yf}`, 0]);
-  let found = shuffle((await gather(qs, market)).flat());
+  // Artistas de ese género (los tuyos y los conocidos) para que nunca quede corta.
+  const seedNames = shuffle([
+    ...profile.artists.filter((a) => (profile.aliasOf || {})[a.id] === alias.label).slice(0, 6).map((a) => a.name),
+    ...shuffle(ARTIST_SEEDS[alias.label] || []).slice(0, 4),
+  ]).slice(0, 5);
+  const seedQs = seedNames.map((n) => [`artist:"${n}"${yf}`, discover ? 10 : 0]);
+  const lists = await gather([...qs, ...seedQs], market);
+  if (aliasByLabel(alias.label)) learnAliases(lists.slice(0, qs.length).flat().map((t) => [t.artistIds[0], alias.label]));
+  let found = shuffle(lists.flat());
   if (discover) found = found.filter((t) => !t.artistIds.some((id) => known.has(id)));
   if (found.length < 6) {
     const more = (await gather([[`genre:"${g1}"`, 0], [`genre:"${g1}"`, 10], [`${alias.label}${yf}`, 0]], market)).flat();
     found = found.concat(shuffle(more));
   }
-  const mine = discover ? [] : shuffle(profile.tracks.filter((t) => t.artistIds.some((id) => {
-    const a = profile.artists.find((x) => x.id === id);
-    return a && aliasOfArtistGenres(a.genres) === alias;
-  })));
+  const mine = discover ? [] : shuffle(profile.tracks.filter((t) => t.artistIds.some((id) => (profile.aliasOf || {})[id] === alias.label)));
   const mineShare = mode.likes ? Math.ceil(count * 0.6) : mode.fresh ? 0 : 4;
-  let tracks = arrange([mine.slice(0, mineShare), found], count, avoidFor(profile, discover));
+  let tracks = arrange([mine.slice(0, mineShare), found], count, avoidFor(profile, discover, mode.more ? 200 : 80));
+  if (tracks.length < 10 && !discover) tracks = arrange([mine.slice(0, mineShare), found], count, avoidFor(profile, false, 0));
   if (tracks.length < 5 && discover) tracks = arrange([found], count, avoidFor(profile, false));
   return tracks;
 }
@@ -575,10 +766,86 @@ async function motivationSession(profile) {
   return arrange(tracks.map((t) => [t]), settings().count, avoid);
 }
 
+
+// Lo que me pides también cuenta como gusto (tu historial de pedidos).
+function noteAsked(artists, profile) {
+  const m = memory();
+  m.asked = m.asked || {};
+  artists.forEach((ar) => { const al = aliasOfArtist(ar, profile.aliasOf); if (al) m.asked[al.label] = Math.min(20, (m.asked[al.label] || 0) + 1); });
+  saveMemory(m);
+}
+
+// Pregunta a Spotify si un artista es de alguno de estos géneros (pocas preguntas, en paralelo).
+async function probeArtist(artist, labels) {
+  const results = await Promise.all(labels.map(aliasByLabel).filter(Boolean).map(async (al) => {
+    try {
+      const r = await sp('/search', { query: { q: `artist:"${artist.name}" genre:"${al.genres[0]}"`, type: 'track', limit: 1 } });
+      const t = r && r.tracks && r.tracks.items && r.tracks.items[0];
+      return t && t.artists.some((x) => x.id === artist.id) ? al : null;
+    } catch { return null; }
+  }));
+  const al = results.find(Boolean) || null;
+  if (al) learnAliases([[artist.id, al.label]]);
+  return al;
+}
+
+// Un artista: sus canciones (populares o menos conocidas) y, para que fluya, más de SU MISMO género.
+async function artistSession(artist, mode, profile) {
+  const count = settings().count;
+  const yf = yearFilter(mode);
+  const ownOffs = mode.deep ? [20, 30, 40, 50] : [0, 10, 20];
+  const taste = tasteByGenre(profile);
+  const guess = Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 3);
+  const knownAl = aliasOfArtist(artist, profile.aliasOf);
+  const [ownLists, probed] = await Promise.all([
+    gather(ownOffs.map((o) => [`artist:"${artist.name}"${mode.fresh ? yf : ''}`, o])),
+    knownAl ? Promise.resolve(knownAl) : probeArtist(artist, [...new Set([...guess, 'corridos tumbados', 'reguetón', 'trap latino', 'rap', 'pop latino'])].slice(0, 6)),
+  ]);
+  const al = knownAl || probed;
+  let own = ownLists.flat().filter((t) => t.artistIds.includes(artist.id));
+  if (!mode.popular && !mode.deep) own = shuffle(own);
+  const onlyHim = mode.popular || mode.deep || /\bsolo\b|\bpuro\b|\bpuras?\b|nada mas/.test(mode.raw || '');
+  let others = [];
+  if (al && !onlyHim) {
+    const g = al.genres[0];
+    const lists = await gather([[`genre:"${g}"${yf}`, rnd(2) * 10], [`genre:"${g}"${yf}`, 20], [`genre:"${g}"${yf}`, 30]]);
+    others = shuffle(lists.flat().filter((t) => !t.artistIds.includes(artist.id)));
+  }
+  const ownShare = mode.similar ? 2 : onlyHim ? count : Math.ceil(count * 0.6);
+  const tracks = arrange([own.slice(0, ownShare), others], count, avoidFor(profile, false, mode.more ? 200 : 0));
+  noteAsked([artist], profile);
+  const label = mode.similar ? `parecidos a ${artist.name}` : artist.name;
+  const what = mode.deep ? 'las menos conocidas de ' : mode.popular ? 'lo más popular de ' : '';
+  const intro = mode.similar ? `Artistas del estilo de ${artist.name}${al ? `, todo ${al.label}` : ''}.`
+    : `Va ${what}${artist.name}${!onlyHim && al ? `, y para que fluya, más ${al.label} del mismo estilo` : ''}.`;
+  return { tracks, key: al ? al.label : '', label, intro };
+}
+
+// Busca playlists en Spotify con tus palabras y usa la que tenga más canciones que sí se puedan leer.
+async function playlistSession(query, profile) {
+  try {
+    const r = await spSearch(query, 'playlist', 0);
+    const pls = ((r && r.playlists && r.playlists.items) || []).filter(Boolean).slice(0, 4);
+    const lists = await Promise.all(pls.map(async (pl) => {
+      let d = null;
+      try { d = await sp(`/playlists/${pl.id}/items`, { query: { limit: 50 } }); }
+      catch { try { d = await sp(`/playlists/${pl.id}/tracks`, { query: { limit: 50 } }); } catch { d = null; } }
+      const items = ((d && d.items) || []).map((i) => i && (i.item || i.track)).filter((t) => t && t.uri && t.type !== 'episode' && !t.is_local);
+      return { pl, tracks: items.map(simplify) };
+    }));
+    const best = lists.sort((a, b) => b.tracks.length - a.tracks.length)[0];
+    if (!best || best.tracks.length < 6) return null;
+    const tracks = arrange([shuffle(best.tracks)], settings().count, avoidFor(profile, false, 0));
+    return { tracks, key: '', label: best.pl.name, intro: `No conocía "${query}", así que lo busqué en Spotify y te puse la playlist "${best.pl.name}".` };
+  } catch { return null; }
+}
+
 // Arma la sesión. Siempre UN solo género, para que todo fluya.
-async function buildSession(text) {
-  const { genre, mode, country, artistQuery } = interpret(text);
-  const profile = store.get('profile2', null) || await loadProfile(false);
+async function buildSession(text, extra) {
+  const { genre, mode, country, artistQuery, artistParts } = interpret(text);
+  Object.assign(mode, extra || {});
+  let profile = store.get('profile2', null);
+  if (!profile || !profile.aliasOf) profile = await loadProfile(true);
   const count = settings().count;
 
   // País: lo que más suena allá ahora.
@@ -605,7 +872,23 @@ async function buildSession(text) {
     return { tracks, key: alias.label, label: `género nuevo: ${alias.label}`, intro: `Género nuevo para ti: ${alias.label}. Toda la sesión es de ${alias.label}. Si te gusta, dale ❤ y lo tendré en cuenta; si no, 👎 y no te lo vuelvo a poner.` };
   }
 
-  // Pidió un artista o algo que no reconocí: miro a la vez si es artista o género de Spotify.
+  // Varios artistas a la vez: sus canciones más populares, mezcladas.
+  if (!genre && artistParts.length >= 2) {
+    const found = (await Promise.all(artistParts.map(findArtist))).filter((x) => x && (x.exact || x.sim >= 0.55));
+    const uniq = found.filter((x, i) => found.findIndex((y) => y.id === x.id) === i);
+    if (uniq.length >= 2) {
+      const per = Math.ceil(count / uniq.length) + 2;
+      const offs = mode.deep ? [20, 30, 40] : per > 10 ? [0, 10] : [0];
+      const lists = await gather(uniq.flatMap((ar) => offs.map((o) => [`artist:"${ar.name}"`, o])));
+      const groups = uniq.map((ar, i) => lists.slice(i * offs.length, (i + 1) * offs.length).flat().filter((t) => t.artistIds.includes(ar.id)).slice(0, per));
+      const tracks = arrange(groups, count, avoidFor(profile, false, mode.more ? 200 : 0));
+      const names = uniq.map((x) => x.name).join(' y ');
+      noteAsked(uniq, profile);
+      return { tracks, key: (aliasOfArtist(uniq[0], profile.aliasOf) || {}).label || '', label: names, intro: `${mode.deep ? 'Las menos conocidas' : 'Lo más popular'} de ${names}, mezclado.` };
+    }
+  }
+
+  // Un artista, o algo que no reconocí: miro a la vez si es artista o género de Spotify.
   if (artistQuery) {
     const [artist, asGenre] = await Promise.all([
       findArtist(artistQuery),
@@ -616,23 +899,17 @@ async function buildSession(text) {
       const tracks = await genreSession(alias, mode, profile);
       return { tracks, key: artistQuery, label: artistQuery, intro: `Sesión de ${artistQuery}, sin mezclar con otros géneros.` };
     }
-    if (artist && (artist.exact || !genre)) {
-      const al = aliasOfArtistGenres(artist.genres);
-      const g = (artist.genres || [])[0];
-      const yf = yearFilter(mode);
-      const qs = [[`artist:"${artist.name}"`, 0], [`artist:"${artist.name}"`, 10]];
-      if (g) qs.push([`genre:"${g}"${yf}`, rnd(2) * 10], [`genre:"${g}"${yf}`, 20], [`genre:"${g}"${yf}`, 30]);
-      const lists = await gather(qs);
-      const own = shuffle([...lists[0], ...lists[1]].filter((t) => t.artistIds.includes(artist.id)));
-      const others = shuffle(lists.slice(2).flat().filter((t) => !t.artistIds.includes(artist.id)));
-      const ownShare = mode.similar ? 2 : Math.ceil(count * 0.55);
-      const tracks = arrange([own.slice(0, ownShare), others], count, avoidFor(profile, mode.discover));
-      const label = mode.similar ? `parecidos a ${artist.name}` : artist.name;
-      const intro = mode.similar ? `Artistas del estilo de ${artist.name}${g ? `, todo ${g}` : ''}.`
-        : `Va ${artist.name}${g ? `, y para que fluya, más ${g} del mismo estilo` : ''}.`;
-      return { tracks, key: al ? al.label : (g || artist.name), label, intro };
+    if (artist && artist.exact) {
+      const r = await artistSession(artist, mode, profile);
+      if (r.tracks.length >= 5) return r;
+      const pl = await playlistSession(artistQuery, profile);
+      return pl || r;
     }
     if (!genre) {
+      // No lo conozco: busco playlists en Spotify con esas palabras y pongo la mejor.
+      const pl = await playlistSession(artistQuery, profile);
+      if (pl) return pl;
+      if (artist) return artistSession(artist, mode, profile);
       const lists = await gather([[artistQuery, 0], [artistQuery, 10]]);
       return { tracks: arrange([lists.flat()], count, avoidFor(profile, false)), key: '', label: artistQuery, intro: `Esto encontré para "${artistQuery}".` };
     }
@@ -641,6 +918,7 @@ async function buildSession(text) {
   // Pidió un género: solo ese género.
   if (genre) {
     const tracks = await genreSession(genre, mode, profile);
+    if (tracks.length < 10) { const pl = await playlistSession(text, profile); if (pl && pl.tracks.length > tracks.length) return pl; }
     const adj = mode.fresh ? ' nuevos' : mode.old ? ' de los clásicos' : mode.discover ? ' que nunca has escuchado' : '';
     return { tracks, key: genre.label, label: genre.label, intro: `Sesión de ${genre.label}${adj}, sin mezclar con otros géneros.` };
   }
@@ -653,11 +931,12 @@ async function buildSession(text) {
   }
 
   // Tus gustos (o descubrir dentro de tus gustos): uno de tus géneros por sesión.
-  const alias = pickMyGenre(profile);
+  let alias = pickMyGenre(profile);
+  if (!alias && !profile.probed) { await probeUnknownArtists(profile).catch(() => {}); profile.probed = true; alias = pickMyGenre(profile); }
   if (!alias) {
     const y = new Date().getFullYear();
     const lists = await gather([[`year:${y}`, 0], [`year:${y}`, 10]]);
-    return { tracks: arrange([lists.flat()], count, avoidFor(profile, false)), key: '', label: 'lo nuevo', intro: 'Aún no conozco tus géneros, así que va lo más nuevo. Dale ❤ a lo que te guste para aprender.' };
+    return { tracks: arrange([lists.flat()], count, avoidFor(profile, false)), key: '', label: 'lo nuevo', intro: 'Spotify casi no me dio datos de lo que escuchas, así que va lo más nuevo. Dale ❤ a lo que te guste o pídeme artistas, y así aprendo.' };
   }
   const tracks = await genreSession(alias, mode, profile);
   const intro = mode.discover ? `Descubrir: ${alias.label} que nunca has escuchado, de artistas nuevos para ti.`
@@ -754,9 +1033,45 @@ async function genresOf(artistIds) {
   return cache;
 }
 
-function plNameOf(trackArtistIds, cache) {
+// Averigua el género de muchos artistas: lo aprendido + la lista + colaboraciones + preguntas a Spotify.
+async function classifyArtists(tracks, onProgress) {
+  const profile = store.get('profile2', null) || { aliasOf: {} };
+  const map = {};
+  const names = {};
+  const freq = {};
+  tracks.forEach((t) => t.artists.forEach((a) => { names[a.id] = a.name; freq[a.id] = (freq[a.id] || 0) + 1; }));
+  Object.keys(names).forEach((id) => {
+    const al = (profile.aliasOf || {})[id] ? aliasByLabel(profile.aliasOf[id]) : aliasOfArtist({ id, name: names[id], genres: [] });
+    if (al) map[id] = al.label;
+  });
+  const spread = () => tracks.forEach((t) => {
+    const known = t.artists.map((a) => map[a.id]).find(Boolean);
+    if (known) t.artists.forEach((a) => { if (!map[a.id]) map[a.id] = known; });
+  });
+  spread(); spread();
+  const counts = {};
+  Object.values(map).forEach((l) => { counts[l] = (counts[l] || 0) + 1; });
+  const candidates = [...new Set([...Object.keys(counts).sort((a, b) => counts[b] - counts[a]).slice(0, 5), 'corridos tumbados', 'reguetón', 'trap latino', 'rap', 'pop latino'])].slice(0, 7).map(aliasByLabel).filter(Boolean);
+  const unknown = Object.keys(names).filter((id) => !map[id]).sort((a, b) => freq[b] - freq[a]).slice(0, 40);
+  let done = 0;
+  await pool(unknown, 4, async (id) => {
+    for (const al of candidates) {
+      try {
+        const r = await sp('/search', { query: { q: `artist:"${names[id]}" genre:"${al.genres[0]}"`, type: 'track', limit: 1 } });
+        const t = r && r.tracks && r.tracks.items && r.tracks.items[0];
+        if (t && t.artists.some((x) => x.id === id)) { map[id] = al.label; break; }
+      } catch { break; }
+    }
+    if (onProgress) onProgress(++done, unknown.length);
+  });
+  spread();
+  learnAliases(Object.entries(map));
+  return map;
+}
+
+function plNameOf(trackArtistIds, map) {
   for (const id of trackArtistIds) {
-    const al = aliasOfArtistGenres(cache[id]);
+    const al = map[id] && aliasByLabel(map[id]);
     if (al) return al.pl;
   }
   return null;
@@ -787,7 +1102,7 @@ async function organizeLiked(bubble) {
   const fresh = liked.filter((i) => !org.at || Date.parse(i.added_at) > org.at);
   if (!fresh.length) { say('Tus Me gusta ya están organizados. Desde ahora, cada ❤ va también a la playlist de su género.'); return; }
   say(`Viendo el género de ${fresh.length} canciones…`);
-  const cache = await genresOf(fresh.flatMap((i) => i.track.artists.map((a) => a.id)));
+  const cache = await classifyArtists(fresh.map((i) => i.track), (d, t) => say(`Viendo el género de tus artistas… ${d} de ${t}`));
   const groups = {};
   fresh.forEach((i) => {
     const pl = plNameOf(i.track.artists.map((a) => a.id), cache) || 'Otros';
@@ -801,7 +1116,7 @@ async function organizeLiked(bubble) {
   });
   const names = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
   if (names.length === 1 && names[0] === 'Otros' && !org.at) {
-    say('Spotify no me dio los géneros de tus artistas, así que no pude separarlos bien. No creé nada para no hacerte un desorden.');
+    say('No logré saber el género de tus artistas, así que no creé nada para no hacerte un desorden. Pídeme música un rato (así aprendo géneros) y vuelve a intentarlo.');
     return;
   }
   let n = 0;
@@ -821,7 +1136,7 @@ async function organizeLiked(bubble) {
 async function fileByGenre(track) {
   const org = store.get('organizer', null);
   if (!org || !org.at) return '';
-  const cache = await genresOf(track.artistIds || []);
+  const cache = await classifyArtists([{ artists: (track.artistIds || []).map((id, i) => ({ id, name: (track.artistNames || [])[i] || '' })) }]);
   const pl = plNameOf(track.artistIds || [], cache) || 'Otros';
   if (!org.playlists[pl]) { const p = await createPlaylist('SOFIA · ' + pl); org.playlists[pl] = p.id; store.set('organizer', org); }
   await addToPlaylist(org.playlists[pl], [track.uri]);
@@ -838,7 +1153,7 @@ function learn(track, delta) {
   let key = last && last.uris && last.uris.includes(track.uri) ? last.key : '';
   if (!key) {
     const cache = store.get('artistGenres', {});
-    const al = (track.artistIds || []).map((id) => aliasOfArtistGenres(cache[id])).find(Boolean);
+    const al = (track.artistIds || []).map((id, i) => aliasOfArtistGenres(cache[id]) || aliasOfArtist({ id, name: (track.artistNames || [])[i] || '', genres: [] })).find(Boolean);
     key = al ? al.label : '';
   }
   if (key) m.genres[key] = Math.max(-5, Math.min(10, (m.genres[key] || 0) + delta));
@@ -892,9 +1207,19 @@ async function handleRequest(text) {
     try { await organizeLiked(b); } catch (e) { addMessage('error', 'No pude terminar de organizar: ' + friendlyError(e)); }
     busy = false; return;
   }
+  // Memoria de la conversación: "pon más", "otras", "más nuevas"… siguen con lo último que pediste.
+  let request = text;
+  let extra = {};
+  const last = store.get('lastRequest', null);
+  const FOLLOW = /^(y )?(pon(me)? |dame |quiero |echale )?(mas|otras?|otros?|sigue|seguir|continua|lo mismo|igual|otra tanda|mas canciones|mas temas|mas de eso|mas asi)( (de )?(eso|esas?|esos?|asi|parecid\w*|igual\w*|similares?|canciones|temas|del mismo|de lo mismo|estilo))*$/;
+  const TWEAK = /^(y |pero |ahora )?(pon(me)? |dame )?(mas |las |unas |solo )?(nuev|recient|viej|antigu|clasic|popular|famos|pegad|menos|joyit|rarez|tranquil|suave)\w*( \w+){0,3}$/;
+  if (last && FOLLOW.test(t)) { request = last.text; extra = { more: true }; }
+  else if (last && TWEAK.test(t) && !interpret(t).artistQuery && !interpret(t).genre) { request = last.text + ' ' + t; extra = { more: true }; }
   const thinking = addMessage('sofia thinking', 'Armando tu sesión…');
   try {
-    const session = await buildSession(text);
+    const session = await buildSession(request, extra);
+    store.set('lastRequest', { text: request, at: Date.now() });
+    if (session.key && aliasByLabel(session.key)) { const m = memory(); m.asked = m.asked || {}; m.asked[session.key] = Math.min(20, (m.asked[session.key] || 0) + 0.5); saveMemory(m); }
     store.set('lastSession', { key: session.key, uris: session.tracks.map((x) => x.uri) });
     const tracks = session.tracks;
     if (!tracks.length) {
@@ -1002,7 +1327,7 @@ async function refreshNowPlaying() {
     const r = await sp('/me/player');
     const item = r && r.item;
     if (!item) { current = null; $('npTitle').textContent = 'Nada sonando'; $('npArtist').textContent = 'Abre Spotify y pídele algo a SOFIA'; $('npArt').removeAttribute('src'); return; }
-    current = { uri: item.uri, id: item.id, artistIds: (item.artists || []).map((a) => a.id), label: `${(item.artists || []).map((a) => a.name).join(', ')} - ${item.name}`, playing: r.is_playing };
+    current = { uri: item.uri, id: item.id, artistIds: (item.artists || []).map((a) => a.id), artistNames: (item.artists || []).map((a) => a.name), label: `${(item.artists || []).map((a) => a.name).join(', ')} - ${item.name}`, playing: r.is_playing };
     $('npTitle').textContent = item.name;
     $('npArtist').textContent = (item.artists || []).map((a) => a.name).join(', ');
     const img = item.album && item.album.images && item.album.images[item.album.images.length > 1 ? 1 : 0];
@@ -1067,7 +1392,7 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v4 · 18 nov';
+const VERSION = 'v5 · 18 nov';
 async function init() {
   const v = document.getElementById('version'); if (v) v.textContent = VERSION;
   setupSettings();
@@ -1087,8 +1412,12 @@ async function init() {
   }
   addMessage('sofia', '¡Hola! Abre Spotify y pídeme lo que quieras: "pon corridos", "pon Natanael Cano", "un género nuevo", "lo que se escucha en Puerto Rico", "organiza mis me gusta por géneros"…');
   const p = store.get('profile2', null);
-  if (!p) loadProfile(false).catch(() => {});
-  else if (Date.now() - p.at > 12 * 3600 * 1000) loadProfile(true).catch(() => {}); // se actualiza en segundo plano
+  if (!p || !p.aliasOf) loadProfile(true).catch(() => {}); // primero que nada: leer tus gustos
+  else {
+    const sum = tasteSummary(p);
+    if (sum) addMessage('sofia', 'Tus gustos ahora mismo:\n' + sum);
+    if (Date.now() - p.at > 6 * 3600 * 1000) loadProfile(true, true).catch(() => {}); // se actualiza en segundo plano
+  }
   refreshNowPlaying();
 }
 
