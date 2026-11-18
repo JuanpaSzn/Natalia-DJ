@@ -99,3 +99,5 @@ button { font: inherit; color: inherit; cursor: pointer; }
 body.setup-open .player, body.setup-open .chips, body.setup-open .composer { display: none; }
 body.setup-open .panel { max-height: none; flex: 1; }
 code { color: var(--accent); word-break: break-all; }
+
+.open-spotify { display: inline-block; margin-top: 8px; padding: 8px 14px; border-radius: 10px; background: var(--spotify); color: #06200f; font-weight: 600; text-decoration: none; }

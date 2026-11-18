@@ -1027,18 +1027,59 @@ async function pickDevice() {
   return devices.find((d) => d.is_active) || devices.find((d) => d.type === 'Smartphone') || devices[0];
 }
 
+// Si Spotify no está abierto, SOFIA lo abre sola, espera a que aparezca y pone la cola.
+let pendingUris = null;
+async function waitForDevice(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    try { const d = await pickDevice(); if (d) return d; } catch { /* seguimos esperando */ }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return null;
+}
+async function playOn(device, uris) {
+  if (!device.is_active) {
+    try { await sp('/me/player', { method: 'PUT', body: { device_ids: [device.id], play: false } }); } catch { /* algunos equipos no lo necesitan */ }
+  }
+  await sp('/me/player/play', { method: 'PUT', query: { device_id: device.id }, body: { uris } });
+  pendingUris = null;
+  setTimeout(refreshNowPlaying, 1200);
+}
+function openSpotifyApp(uri) {
+  try { location.href = uri || 'spotify:'; } catch { /* si el teléfono no deja, queda el botón */ }
+}
+async function resumePending() {
+  if (!pendingUris) return;
+  const uris = pendingUris;
+  const device = await waitForDevice(10000);
+  if (device && pendingUris === uris) {
+    try { await playOn(device, uris); addMessage('sofia', '¡Listo, ya está sonando en Spotify!'); }
+    catch (e) { addMessage('error', friendlyError(e)); }
+  }
+}
+
 async function playUris(uris) {
   try {
     await sp('/me/player/play', { method: 'PUT', body: { uris } });
+    pendingUris = null;
+    setTimeout(refreshNowPlaying, 1200);
+    return;
   } catch (e) {
     if (e.status !== 404 && e.status !== 403) throw e;
-    const device = await pickDevice();
-    if (!device) {
-      throw new Error('No encuentro Spotify abierto. Abre la app de Spotify en tu iPhone, pon cualquier canción un segundo y vuelve a pedírmelo.');
-    }
-    await sp('/me/player/play', { method: 'PUT', query: { device_id: device.id }, body: { uris } });
+    if (e.status === 403 && /premium/i.test(e.message)) throw e;
   }
-  setTimeout(refreshNowPlaying, 1200);
+  let device = await pickDevice().catch(() => null);
+  if (device) return playOn(device, uris);
+  // Spotify cerrado: lo abro yo con la primera canción y espero a que aparezca.
+  pendingUris = uris;
+  const b = addMessage('sofia', 'Abriendo Spotify para poner tu música… Si te quedas en Spotify, vuelve a SOFIA y arranca sola.');
+  const link = document.createElement('a');
+  link.href = uris[0]; link.textContent = 'Abrir Spotify'; link.className = 'open-spotify';
+  b.appendChild(document.createElement('br')); b.appendChild(link);
+  openSpotifyApp(uris[0]);
+  waitForDevice(20000).then((d) => {
+    if (d && pendingUris === uris) return playOn(d, uris).then(() => addMessage('sofia', '¡Listo, ya está sonando en Spotify!'));
+  }).catch((e) => addMessage('error', friendlyError(e)));
 }
 
 async function savePlaylist(name, uris) {
@@ -1431,7 +1472,7 @@ function setupPlayer() {
   $('btnLove').onclick = act(() => rate(true));
   $('btnDislike').onclick = act(() => rate(false));
   setInterval(() => { if (!busy) refreshNowPlaying(); }, 15000);
-  document.addEventListener('visibilitychange', refreshNowPlaying);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshNowPlaying(); resumePending(); } });
 }
 
 // ---------- Ajustes ----------
@@ -1448,10 +1489,16 @@ function fillSetup() {
 function setupSettings() {
   $('btnSettings').onclick = () => { fillSetup(); showSetup($('setup').classList.contains('hidden')); };
   $('btnSaveSetup').onclick = () => {
-    store.set('clientId', $('inClientId').value.trim());
+    const id = $('inClientId').value.replace(/\s+/g, '');
+    $('inClientId').value = id;
+    if (!/^[0-9a-f]{32}$/i.test(id)) { addMessage('error', 'Ese Client ID no se ve bien: deben ser 32 letras y números, sin espacios. Cópialo otra vez de Spotify for Developers.'); return; }
+    store.set('clientId', id);
     store.set('count', Math.min(40, Math.max(5, Number($('inCount').value) || DEFAULT_COUNT)));
     fillSetup();
-    addMessage('sofia', store.get('token', null) ? 'Guardado.' : 'Guardado. Ahora toca "Conectar con Spotify".');
+    if (store.get('token', null)) { addMessage('sofia', 'Guardado.'); return; }
+    // Sin conexión todavía: voy directo a Spotify para conectar (sin buscar otro botón).
+    addMessage('sofia', 'Guardado. Te llevo a Spotify para conectar…');
+    login();
   };
   $('btnLogin').onclick = login;
   $('btnLogout').onclick = () => { store.del('token'); store.del('profile2'); fillSetup(); addMessage('sofia', 'Desconecté tu Spotify.'); };
@@ -1474,7 +1521,7 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v6 · 18 nov';
+const VERSION = 'v8 · 18 nov';
 async function init() {
   const v = document.getElementById('version'); if (v) v.textContent = VERSION;
   setupSettings();
