@@ -3,26 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>SOFIA DJ</title>
+  <title>Natalia DJ</title>
   <meta name="theme-color" content="#0f0f14">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="SOFIA">
+  <meta name="apple-mobile-web-app-title" content="Natalia">
   <link rel="apple-touch-icon" href="icon-180.png">
   <link rel="icon" href="icon-512.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
   <header class="top">
-    <div class="brand"><span class="logo">S</span> SOFIA <small>tu DJ</small> <small id="version" class="version">v10 · 18 nov</small></div>
+    <div class="brand"><span class="logo">N</span> Natalia <small>tu DJ</small> <small id="version" class="version">v12 · 18 nov</small></div>
     <button id="btnSettings" class="icon-btn" aria-label="Ajustes">⚙︎</button>
   </header>
 
   <!-- Pantalla de configuración inicial -->
   <section id="setup" class="panel hidden">
-    <h2>Configura a SOFIA</h2>
+    <h2>Configura a Natalia</h2>
     <p class="hint">Solo se hace una vez. Tu Client ID se guarda únicamente en este teléfono.</p>
     <p class="hint">Redirect URI para tu app de Spotify: <code id="redirectHint"></code></p>
     <label>Client ID de Spotify
@@ -41,12 +41,12 @@
       <button id="btnLogout" class="ghost hidden">Desconectar Spotify</button>
       <details>
         <summary>Código de conexión (si Spotify se abrió en otra ventana)</summary>
-        <p class="hint">Si al conectar Spotify terminaste en Safari y no en SOFIA: en esa ventana toca "Mostrar código", cópialo, y pégalo aquí en SOFIA con "Usar código".</p>
+        <p class="hint">Si al conectar Spotify terminaste en Safari y no en Natalia: en esa ventana toca "Mostrar código", cópialo, y pégalo aquí en Natalia con "Usar código".</p>
         <input id="inTransfer" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Código de conexión">
         <button id="btnShowCode" class="ghost">Mostrar código</button>
         <button id="btnUseCode" class="ghost">Usar código</button>
       </details>
-      <button id="btnForget" class="ghost">Borrar la memoria de SOFIA</button>
+      <button id="btnForget" class="ghost">Borrar la memoria de Natalia</button>
     </div>
   </section>
 
@@ -71,7 +71,7 @@
     <img id="npArt" alt="" class="art">
     <div class="np">
       <div id="npTitle" class="np-title">Nada sonando</div>
-      <div id="npArtist" class="np-artist">Abre Spotify y pídele algo a SOFIA</div>
+      <div id="npArtist" class="np-artist">Abre Spotify y pídele algo a Natalia</div>
     </div>
     <div class="controls">
       <button id="btnDislike" class="icon-btn" aria-label="No me gustó">👎</button>
@@ -88,6 +88,6 @@
     <button type="submit" class="primary send" aria-label="Enviar">➤</button>
   </form>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>

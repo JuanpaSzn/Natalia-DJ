@@ -1,4 +1,4 @@
-/* SOFIA DJ — web app personal que conversa contigo y pone música en tu Spotify.
+/* Natalia DJ — web app personal que conversa contigo y pone música en tu Spotify.
  * Todo corre en tu teléfono, sin IA externa: entiende tu pedido al instante y arma sesiones de un solo género.
  */
 'use strict';
@@ -12,6 +12,7 @@ const SCOPES = [
 const DEFAULT_COUNT = 25;
 const REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
 
+const DEFAULT_CLIENT_ID = '14ae18a9acca4246a56e7331a962edd5';
 const store = {
   get(key, fallback) {
     try { const v = localStorage.getItem('sofia.' + key); return v === null ? fallback : JSON.parse(v); }
@@ -23,8 +24,16 @@ const store = {
   del(key) { try { localStorage.removeItem('sofia.' + key); } catch { /* nada */ } },
 };
 
+// v12: Natalia usa su propio Client ID. Una sola vez: cambia el ID, borra la conexión vieja y los bloqueos viejos.
+if (store.get('appName', '') !== 'natalia') {
+  store.set('clientId', DEFAULT_CLIENT_ID);
+  ['token', 'searchBlockedUntil', 'apilog'].forEach((k) => store.del(k));
+  store.set('limitGuess', 12);
+  store.set('appName', 'natalia');
+}
+
 const settings = () => ({
-  clientId: store.get('clientId', ''),
+  clientId: store.get('clientId', DEFAULT_CLIENT_ID),
   count: (() => { const c = Number(store.get('count', DEFAULT_COUNT)) || DEFAULT_COUNT; return c === 15 ? DEFAULT_COUNT : c; })(),
 });
 
@@ -142,13 +151,15 @@ async function getAccessToken() {
 let inFlight = 0;
 const waiting = [];
 let pausedUntil = 0;
+let searchBlockedUntil = Number(store.get('searchBlockedUntil', 0)) || 0;
+const searchBlocked = () => searchBlockedUntil > Date.now();
 async function slot() {
   if (inFlight >= 3) await new Promise((r) => waiting.push(r));
   inFlight++;
 }
 function release() { inFlight--; const next = waiting.shift(); if (next) next(); }
 
-// Registro de cada llamada a Spotify (para el modo diagnóstico: toca 5 veces el logo "S").
+// Registro de cada llamada a Spotify (para el modo diagnóstico: toca 5 veces el logo "N").
 const apiLog = store.get('apilog', []);
 let apiLogDirty = false;
 function logCall(method, path, query, status, retryAfter, ms) {
@@ -157,7 +168,7 @@ function logCall(method, path, query, status, retryAfter, ms) {
   if (!apiLogDirty) { apiLogDirty = true; setTimeout(() => { apiLogDirty = false; store.set('apilog', apiLog); }, 2000); }
 }
 const callsSince = (ms) => apiLog.filter((x) => x.t > Date.now() - ms).length;
-// SOFIA aprende cuántas llamadas aguanta Spotify en 30 s y nunca se pasa (deja 2 libres para reproducir).
+// Natalia aprende cuántas llamadas aguanta Spotify en 30 s y nunca se pasa (deja 2 libres para reproducir).
 let limitGuess = Number(store.get('limitGuess', 12)) || 12;
 function growLimit() {
   const recent429 = apiLog.some((x) => x.s === 429 && x.t > Date.now() - 30 * 60000);
@@ -191,10 +202,21 @@ async function spRaw(path, { method = 'GET', body, query } = {}, retried = false
   }
   if (res.status === 429) {
     const secs = Number(res.headers.get('Retry-After')) || 3;
-    pausedUntil = Math.max(pausedUntil, Date.now() + secs * 1000);
-    limitGuess = Math.max(5, Math.min(limitGuess, callsSince(30000) - 1));
-    store.set('limitGuess', limitGuess);
-    const e = new Error('Spotify pidió una pausa'); e.status = 429; e.retryAfter = secs; throw e;
+    let reason = '';
+    try { const j = await res.json(); reason = (j && j.error && j.error.reason) || (j && j.reason) || ''; } catch { /* sin cuerpo */ }
+    if (apiLog.length) apiLog[apiLog.length - 1].r = reason;
+    if (path === '/search') {
+      // Spotify tiene un cupo aparte para búsquedas. Si se acaba, dejo de buscar un rato y uso otros caminos.
+      const recent = apiLog.filter((x) => x.s === 429 && x.p.startsWith('/search') && x.t > Date.now() - 120000).length;
+      const mins = reason === 'QUOTA_EXCEEDED' ? 60 : recent >= 2 ? 15 : 0;
+      searchBlockedUntil = Math.max(searchBlockedUntil, Date.now() + (mins ? mins * 60000 : secs * 1000));
+      store.set('searchBlockedUntil', searchBlockedUntil);
+    } else {
+      pausedUntil = Math.max(pausedUntil, Date.now() + secs * 1000);
+      limitGuess = Math.max(5, Math.min(limitGuess, callsSince(30000) - 1));
+      store.set('limitGuess', limitGuess);
+    }
+    const e = new Error('Spotify pidió una pausa'); e.status = 429; e.retryAfter = secs; e.reason = reason; e.search = path === '/search'; throw e;
   }
   if (res.status === 204) return null;
   const text = await res.text();
@@ -276,7 +298,7 @@ const labelOf = (t) => `${t.artists.join(', ')} - ${t.name}`;
 // ---------- Intérprete propio (instantáneo, sin IA) ----------
 const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9& ]/g, ' ').replace(/\s+/g, ' ').trim();
 
-// Géneros que entiende SOFIA. "genres" son los nombres que usa Spotify (el primero es el principal),
+// Géneros que entiende Natalia. "genres" son los nombres que usa Spotify (el primero es el principal),
 // "fam" agrupa géneros parecidos y "pl" es el nombre de la playlist cuando organiza tus Me gusta.
 // Van de lo más específico a lo más general.
 const GENRE_ALIASES = [
@@ -339,7 +361,7 @@ const GENRE_ALIASES = [
 ];
 const aliasByLabel = (label) => GENRE_ALIASES.find((g) => g.label === label) || null;
 
-// A qué género de SOFIA pertenece un género de Spotify (por ejemplo "latin hip hop" -> rap en español).
+// A qué género de Natalia pertenece un género de Spotify (por ejemplo "latin hip hop" -> rap en español).
 function aliasOfSpotifyGenre(g) {
   const n = norm(g);
   return GENRE_ALIASES.find((a) => a.genres.includes(n) || a.genres.includes(g)) || GENRE_ALIASES.find((a) => a.re.test(n)) || null;
@@ -453,6 +475,7 @@ const yearFilter = (mode) => {
 let searchShape = 0;
 let lastSearchError = null;
 async function spSearch(q, type, offset, market) {
+  if (searchBlocked()) { const e = new Error('SEARCH_BLOCKED'); e.status = 429; e.search = true; lastSearchError = e; return null; }
   const shapes = [
     { q, type, limit: 10, offset, market: market || 'from_token' },
     { q, type, limit: 10, offset, ...(market && market !== 'from_token' ? { market } : {}) },
@@ -474,7 +497,7 @@ async function spSearch(q, type, offset, market) {
 
 // Memoria de búsquedas en el teléfono: lo que ya se buscó hoy sale al instante, sin preguntarle a Spotify.
 const CACHE_MAX = 250;
-const memCache = { t: store.get('tcache', {}), a: store.get('acache', {}) };
+const memCache = { t: store.get('tcache', {}), a: store.get('acache', {}), b: store.get('bcache', {}) };
 let cacheDirty = false;
 function cacheGet(kind, key, ttl) {
   const e = memCache[kind][key];
@@ -485,7 +508,7 @@ function cachePut(kind, key, v) {
   c[key] = { at: Date.now(), v };
   const keys = Object.keys(c);
   if (keys.length > CACHE_MAX) keys.sort((x, y) => c[x].at - c[y].at).slice(0, keys.length - CACHE_MAX).forEach((k) => delete c[k]);
-  if (!cacheDirty) { cacheDirty = true; setTimeout(() => { cacheDirty = false; store.set('tcache', memCache.t); store.set('acache', memCache.a); }, 1500); }
+  if (!cacheDirty) { cacheDirty = true; setTimeout(() => { cacheDirty = false; store.set('tcache', memCache.t); store.set('acache', memCache.a); store.set('bcache', memCache.b); }, 1500); }
 }
 
 const tKey = (q, offset, market) => `${q}|${offset}|${market || ''}`;
@@ -499,11 +522,66 @@ async function searchTracks(q, offset = 0, market) {
   return out;
 }
 
+// Artistas que Natalia ya conoce (con su id de Spotify): de tus gustos, tus favoritos y todo lo ya buscado.
+function artistIndex() {
+  const idx = {};
+  const add = (name, id) => { if (name && id && !idx[norm(name)]) idx[norm(name)] = { id, name }; };
+  const profile = store.get('profile2', null);
+  if (profile) {
+    profile.artists.forEach((a) => add(a.name, a.id));
+    profile.tracks.forEach((t) => t.artists.forEach((n, i) => add(n, t.artistIds[i])));
+  }
+  Object.entries(memory().fav || {}).forEach(([id, f]) => add(f.name, id));
+  Object.values(memCache.a).forEach((e) => e.v && add(e.v.name, e.v.id));
+  Object.values(memCache.t).forEach((e) => (e.v || []).forEach((t) => t.artists.forEach((n, i) => add(n, t.artistIds[i]))));
+  return idx;
+}
+function knownArtist(name) {
+  const n = norm(name);
+  const idx = artistIndex();
+  if (idx[n]) return idx[n];
+  let best = null; let bestSim = 0;
+  Object.entries(idx).forEach(([k, v]) => { const sim = similarity(k, n); if (sim > bestSim) { bestSim = sim; best = v; } });
+  return bestSim >= 0.8 ? best : null;
+}
+
+// Canciones de un artista SIN usar la búsqueda: sus álbumes más recientes (otro cupo de Spotify).
+async function artistTracksById(a, { deep } = {}) {
+  let albums = cacheGet('b', 'al:' + a.id, 7 * 24 * 3600 * 1000);
+  if (!albums) {
+    const r = await sp(`/artists/${a.id}/albums`, { query: { include_groups: 'album,single', limit: 10 } });
+    albums = ((r && r.items) || []).filter(Boolean).map((x) => ({ id: x.id, type: x.album_type, date: x.release_date || '', img: ((x.images || [])[x.images.length - 1] || {}).url || '' }));
+    cachePut('b', 'al:' + a.id, albums);
+  }
+  const sorted = albums.slice().sort((x, y) => (y.date > x.date ? 1 : -1));
+  const full = sorted.filter((x) => x.type === 'album');
+  const pick = deep ? shuffle(full.length ? full : sorted).slice(0, 2)
+    : [...new Set([sorted[0], full[0], shuffle(sorted)[0]].filter(Boolean))].slice(0, 2);
+  const lists = await Promise.all(pick.map(async (al) => {
+    const hit = cacheGet('b', 'tr:' + al.id, 30 * 24 * 3600 * 1000);
+    if (hit) return hit;
+    try {
+      const d = await sp(`/albums/${al.id}`);
+      const items = ((d && d.tracks && d.tracks.items) || []).filter((t) => t && t.uri).map((t) => ({
+        uri: t.uri, id: t.id, name: t.name,
+        artistIds: (t.artists || []).map((x) => x.id), artists: (t.artists || []).map((x) => x.name),
+        year: Number(String(al.date).slice(0, 4)) || 0, img: al.img,
+      }));
+      cachePut('b', 'tr:' + al.id, items);
+      return items;
+    } catch { return []; }
+  }));
+  return lists.flat().filter((t) => t.artistIds.includes(a.id));
+}
+
 // Una sola búsqueda trae al artista y sus canciones más populares a la vez.
+// Si ya lo conozco (está en tus gustos o ya lo busqué), ni siquiera busco.
 async function findArtist(name) {
   const n = norm(name);
   const hit = cacheGet('a', n, 7 * 24 * 3600 * 1000);
   if (hit) return { ...hit };
+  const known = knownArtist(name);
+  if (known) return { id: known.id, name: known.name, genres: [], exact: true, sim: 1, tracks: [] };
   try {
     const r = await spSearch(name, 'artist,track', 0);
     const items = ((r && r.artists && r.artists.items) || []).filter(Boolean);
@@ -585,7 +663,7 @@ function pickByWeight(items) {
   return items[items.length - 1].v;
 }
 
-// Géneros de artistas que SOFIA ya conoce (para clasificar y aprender sin volver a preguntarle a Spotify).
+// Géneros de artistas que Natalia ya conoce (para clasificar y aprender sin volver a preguntarle a Spotify).
 function rememberGenres(id, genres) {
   if (!id || !genres || !genres.length) return;
   const c = store.get('artistGenres', {});
@@ -596,7 +674,7 @@ function rememberGenres(id, genres) {
 }
 
 // ---------- Tus gustos: a qué género pertenece cada artista ----------
-// Spotify ya no dice el género de los artistas, así que SOFIA lo averigua con:
+// Spotify ya no dice el género de los artistas, así que Natalia lo averigua con:
 // 1) esta lista de artistas conocidos, 2) lo que aprende de cada búsqueda por género,
 // 3) con quién colaboran tus artistas, y 4) preguntándole a Spotify por género (una sola vez).
 const ARTIST_SEEDS = {
@@ -657,7 +735,7 @@ const ARTIST_SEEDS = {
   'sierreño': ['Ivan Cornejo', 'Eslabon Armado', 'Jasiel Nuñez', 'DannyLux', 'Luis R Conriquez', 'Arsenal Efectivo', 'Los Elegantes de Jerez'],
 };
 
-// Nombre normalizado -> género de SOFIA.
+// Nombre normalizado -> género de Natalia.
 const SEED_INDEX = (() => {
   const idx = {};
   Object.entries(ARTIST_SEEDS).forEach(([label, names]) => names.forEach((n) => {
@@ -667,7 +745,7 @@ const SEED_INDEX = (() => {
   return idx;
 })();
 
-// Lo que SOFIA ya aprendió: id de artista -> género (se va llenando sola con cada búsqueda por género).
+// Lo que Natalia ya aprendió: id de artista -> género (se va llenando sola con cada búsqueda por género).
 function learnedAliases() { return store.get('artistAlias', {}); }
 function learnAliases(pairs) {
   if (!pairs.length) return;
@@ -747,7 +825,7 @@ async function probeUnknownArtists(profile) {
   return profile;
 }
 
-// Resumen corto de tus gustos, para que veas que SOFIA te conoce.
+// Resumen corto de tus gustos, para que veas que Natalia te conoce.
 function tasteSummary(profile) {
   const taste = tasteByGenre(profile);
   const top = Object.keys(taste).sort((a, b) => taste[b] - taste[a]).slice(0, 4);
@@ -822,6 +900,14 @@ async function genreSession(alias, mode, profile, { market, newGenre } = {}) {
     const more = (await gather([[`genre:"${g1}"`, 0], [`${alias.label}${yf}`, 0]], market, found.length ? 0 : 1)).flat();
     found = found.concat(shuffle(more));
   }
+  if (found.length < 10) {
+    const ids = [
+      ...Object.entries(memory().fav || {}).filter(([, f]) => f.label === alias.label).map(([id, f]) => ({ id, name: f.name })),
+      ...shuffle(profile.artists.filter((a) => (profile.aliasOf || {})[a.id] === alias.label)).map((a) => ({ id: a.id, name: a.name })),
+    ].filter((a, i, arr) => arr.findIndex((b) => b.id === a.id) === i).slice(0, 2);
+    const extra = await Promise.all(ids.map((a) => artistTracksById(a, { deep: discover }).catch(() => [])));
+    found = found.concat(shuffle(extra.flat()));
+  }
   const mine = discover ? [] : shuffle(profile.tracks.filter((t) => t.artistIds.some((id) => (profile.aliasOf || {})[id] === alias.label)));
   const mineShare = mode.likes ? Math.ceil(count * 0.6) : mode.fresh ? 0 : 4;
   let tracks = arrange([mine.slice(0, mineShare), found], count, avoidFor(profile, discover, mode.more ? 200 : 80));
@@ -869,6 +955,16 @@ async function countrySession(c, mode, profile) {
   const lists = await gather(pick.map((a) => [`artist:"${a}" year:${y - 1}-${y}`, 0]), c.market, 1);
   const groups = lists.map((l, i) => l.filter((t) => t.artists.some((n) => norm(n) === norm(pick[i]))).slice(0, 6));
   c.artists.forEach((a) => groups.push(shuffle(cachedFor(`artist:"${a}" year:${y - 1}-${y}`).filter((t) => t.artists.some((n) => norm(n) === norm(a)))).slice(0, 4)));
+  // Si la búsqueda no está disponible, uso los artistas de ese país que ya conozco (sin buscar).
+  if (groups.flat().length < 10) {
+    let known = shuffle(c.artists.map(knownArtist).filter(Boolean)).slice(0, 3);
+    if (known.length < 3) {
+      const same = shuffle(profile.artists.filter((a) => (profile.aliasOf || {})[a.id] === c.label && !known.some((k) => k.id === a.id)));
+      known = known.concat(same.map((a) => ({ id: a.id, name: a.name }))).slice(0, 3);
+    }
+    const more = await Promise.all(known.map((a) => artistTracksById(a).catch(() => [])));
+    more.forEach((l) => groups.push(shuffle(l).slice(0, 8)));
+  }
   return arrange(shuffle(groups), settings().count, avoidFor(profile, false));
 }
 
@@ -882,6 +978,11 @@ async function motivationSession(profile) {
   if (tracks.length < settings().count) {
     const extra = await gather([['artist:"Eminem"', 0], [`artist:"${shuffle(['50 Cent', 'DMX', 'Kanye West', 'Kendrick Lamar'])[0]}"`, 0], ['artist:"Eminem"', 10]], undefined, 1);
     tracks = tracks.concat(shuffle(extra.flat()));
+  }
+  if (tracks.length < 10) {
+    const known = ['Eminem', '50 Cent', 'DMX', 'Kendrick Lamar', 'Kanye West', 'Drake'].map(knownArtist).filter(Boolean).slice(0, 2);
+    const more = await Promise.all(known.map((a) => artistTracksById(a).catch(() => [])));
+    tracks = tracks.concat(shuffle(more.flat()));
   }
   const avoid = avoidFor(profile, false);
   avoid.uris = new Set(memory().disliked.map((x) => x.uri));
@@ -925,10 +1026,15 @@ async function artistSession(artist, mode, profile) {
     : mode.fresh ? [[`artist:"${artist.name}"${yf}`, 0]]
     : [[`artist:"${artist.name}"`, 10]];
   const genreQs = al && !onlyHimEarly && !mode.similar ? [[`genre:"${al.genres[0]}"${yf}`, rnd(2) * 10]] : al && mode.similar ? [[`genre:"${al.genres[0]}"${yf}`, 0], [`genre:"${al.genres[0]}"${yf}`, 10]] : [];
-  const firstPage = mode.deep || mode.fresh || mode.more ? [] : (artist.tracks || []);
-  const lists = await gather([...ownQs, ...genreQs], undefined, firstPage.length ? 0 : 1);
+  let firstPage = mode.deep || mode.fresh || mode.more ? [] : (artist.tracks || []);
+  const [lists, albumTracks] = await Promise.all([
+    gather([...ownQs, ...genreQs], undefined, firstPage.length || !searchBlocked() ? 0 : 1),
+    firstPage.length >= 8 && !searchBlocked() ? Promise.resolve([]) : artistTracksById(artist, { deep: mode.deep || mode.more }).catch(() => []),
+  ]);
+  firstPage = [...firstPage, ...albumTracks];
   let own = [...firstPage, ...lists.slice(0, ownQs.length).flat(), ...(mode.fresh ? [] : cachedFor(`artist:"${artist.name}"|`))].filter((t) => t.artistIds.includes(artist.id));
-  const genreTracks = [...lists.slice(ownQs.length).flat(), ...(al ? cachedFor(`genre:"${al.genres[0]}"`) : [])].filter((t) => !t.artistIds.includes(artist.id));
+  const genreTracks = [...lists.slice(ownQs.length).flat(), ...(al ? cachedFor(`genre:"${al.genres[0]}"`) : []),
+    ...(al ? profile.tracks.filter((t) => t.artistIds.some((id) => (profile.aliasOf || {})[id] === al.label)) : [])].filter((t) => !t.artistIds.includes(artist.id));
   if (mode.fav) {
     const m = memory(); m.artists = m.artists || {}; m.fav = m.fav || {};
     m.artists[artist.id] = Math.max(3, (m.artists[artist.id] || 0) + 3);
@@ -1018,9 +1124,18 @@ async function buildSession(text, extra) {
     const uniq = found.filter((x, i) => found.findIndex((y) => y.id === x.id) === i);
     if (uniq.length >= 2) {
       const per = Math.ceil(count / uniq.length) + 2;
-      const offs = mode.deep || mode.more ? [20, 30] : per > 10 ? [10] : [];
-      const lists = offs.length ? await gather(uniq.flatMap((ar) => offs.map((o) => [`artist:"${ar.name}"`, o])), undefined, mode.deep || mode.more ? uniq.length : 0) : [];
-      const groups = uniq.map((ar, i) => [...(mode.deep || mode.more ? [] : (ar.tracks || [])), ...lists.slice(i * offs.length, (i + 1) * offs.length).flat()].filter((t) => t.artistIds.includes(ar.id)).slice(0, per));
+      const deepish = mode.deep || mode.more;
+      const offsOf = (ar) => (deepish ? [20, 30] : [...((ar.tracks || []).length ? [] : [0]), ...(per > 10 ? [10] : [])]);
+      const qs = uniq.map((ar) => offsOf(ar).map((o) => [`artist:"${ar.name}"`, o]));
+      const flatLists = await gather(qs.flat(), undefined, uniq.length);
+      let k = 0;
+      const groups = await Promise.all(uniq.map(async (ar, i) => {
+        const mine = flatLists.slice(k, k + qs[i].length).flat(); k += qs[i].length;
+        let g = [...(deepish ? [] : (ar.tracks || [])), ...mine].filter((t) => t.artistIds.includes(ar.id));
+        // Sin búsqueda disponible: sus álbumes (otro camino de Spotify).
+        if (g.length < 6) g = g.concat(shuffle(await artistTracksById(ar, { deep: deepish }).catch(() => [])));
+        return g.slice(0, per);
+      }));
       const tracks = arrange(groups, count, avoidFor(profile, false, mode.more ? 200 : 0));
       const names = uniq.map((x) => x.name).join(' y ');
       noteAsked(uniq, profile);
@@ -1122,10 +1237,10 @@ function showNowPlaying(t) {
 async function savePlaylist(name, uris) {
   let pl;
   try {
-    pl = await sp('/me/playlists', { method: 'POST', body: { name, public: false, description: 'Creada por SOFIA, tu DJ' } });
+    pl = await sp('/me/playlists', { method: 'POST', body: { name, public: false, description: 'Creada por Natalia, tu DJ' } });
   } catch (e) {
     const me = await sp('/me');
-    pl = await sp(`/users/${encodeURIComponent(me.id)}/playlists`, { method: 'POST', body: { name, public: false, description: 'Creada por SOFIA, tu DJ' } });
+    pl = await sp(`/users/${encodeURIComponent(me.id)}/playlists`, { method: 'POST', body: { name, public: false, description: 'Creada por Natalia, tu DJ' } });
   }
   try { await sp(`/playlists/${pl.id}/items`, { method: 'POST', body: { uris } }); }
   catch (e) { await sp(`/playlists/${pl.id}/tracks`, { method: 'POST', body: { uris } }); }
@@ -1162,7 +1277,7 @@ async function fetchAllLiked(onProgress) {
   return [first.items || [], ...pages].flat().filter((i) => i && i.track && i.track.uri && !i.track.is_local);
 }
 
-// Géneros de cada artista (primero lo que SOFIA ya sabe, luego le pregunta a Spotify).
+// Géneros de cada artista (primero lo que Natalia ya sabe, luego le pregunta a Spotify).
 async function genresOf(artistIds) {
   const cache = store.get('artistGenres', {});
   const profile = store.get('profile2', null);
@@ -1232,7 +1347,7 @@ function plNameOf(trackArtistIds, map) {
 }
 
 async function createPlaylist(name) {
-  const body = { name, public: false, description: 'Tus Me gusta de este género, ordenados por SOFIA' };
+  const body = { name, public: false, description: 'Tus Me gusta de este género, ordenados por Natalia' };
   try { return await sp('/me/playlists', { method: 'POST', body }); }
   catch {
     const me = await sp('/me');
@@ -1276,13 +1391,13 @@ async function organizeLiked(bubble) {
   let n = 0;
   for (const pl of names) {
     say(`Creando playlists… ${++n} de ${names.length} (${pl})`);
-    if (!org.playlists[pl]) { const p = await createPlaylist('SOFIA · ' + pl); org.playlists[pl] = p.id; }
+    if (!org.playlists[pl]) { const p = await createPlaylist('Natalia · ' + pl); org.playlists[pl] = p.id; }
     await addToPlaylist(org.playlists[pl], groups[pl]);
   }
   org.at = Date.now();
   store.set('organizer', org);
   say(`¡Listo! Organicé ${fresh.length} canciones en ${names.length} playlists:\n` +
-    names.map((pl) => `• SOFIA · ${pl} (${groups[pl].length})`).join('\n') +
+    names.map((pl) => `• Natalia · ${pl} (${groups[pl].length})`).join('\n') +
     '\n\nDesde ahora, cada ❤ que des se guarda en tus Me gusta y también en la playlist de su género.');
 }
 
@@ -1292,13 +1407,13 @@ async function fileByGenre(track) {
   if (!org || !org.at) return '';
   const cache = await classifyArtists([{ artists: (track.artistIds || []).map((id, i) => ({ id, name: (track.artistNames || [])[i] || '' })) }]);
   const pl = plNameOf(track.artistIds || [], cache) || 'Otros';
-  if (!org.playlists[pl]) { const p = await createPlaylist('SOFIA · ' + pl); org.playlists[pl] = p.id; store.set('organizer', org); }
+  if (!org.playlists[pl]) { const p = await createPlaylist('Natalia · ' + pl); org.playlists[pl] = p.id; store.set('organizer', org); }
   await addToPlaylist(org.playlists[pl], [track.uri]);
   const liked = store.get('likedUris', []); liked.push(track.uri); store.set('likedUris', liked.slice(-6000));
-  return 'SOFIA · ' + pl;
+  return 'Natalia · ' + pl;
 }
 
-// ---------- ❤ y 👎: SOFIA aprende ----------
+// ---------- ❤ y 👎: Natalia aprende ----------
 function learn(track, delta) {
   const m = memory();
   m.genres = m.genres || {};
@@ -1352,7 +1467,7 @@ async function handleRequest(text, retryOf) {
   if (!store.get('token', null)) { showSetup(true); addMessage('error', 'Primero conéctame a tu Spotify con el botón verde.'); return; }
   busy = true;
   if (!retryOf) { addMessage('user', text); pushHistory('user', text); }
-  const t = norm(text).replace(/^(ve |oye )?(sofi|sofia)\b ?/, '').replace(/ (por favor|porfa)$/, '').trim();
+  const t = norm(text).replace(/^(ve |oye )?(sofi|sofia|nati|natalia)\b ?/, '').replace(/ (por favor|porfa)$/, '').trim();
   const cmd = COMMANDS.find((c) => c.re.test(t));
   if (cmd) {
     try { await cmd.run(); if (cmd.say) addMessage('sofia', cmd.say); setTimeout(refreshNowPlaying, 700); }
@@ -1404,7 +1519,7 @@ async function handleRequest(text, retryOf) {
     btnSave.onclick = async () => {
       btnSave.disabled = true;
       try {
-        const name = 'SOFIA · ' + (answer.nombre_sesion || 'Sesión') + ' · ' + new Date().toLocaleDateString('es');
+        const name = 'Natalia · ' + (answer.nombre_sesion || 'Sesión') + ' · ' + new Date().toLocaleDateString('es');
         await savePlaylist(name, tracks.map((t) => t.uri));
         btnSave.textContent = 'Guardada en tu Spotify ✓';
       } catch (e) { btnSave.textContent = 'No se pudo guardar'; addMessage('error', e.message); }
@@ -1421,10 +1536,9 @@ async function handleRequest(text, retryOf) {
     await playing;
   } catch (e) {
     thinking.remove();
-    if (e.status === 429 && !extra.retry && (e.retryAfter || 0) <= 20) {
-      const inWin = apiLog.filter((x) => x.t > Date.now() - 30000);
-      const freeAt = inWin.length > limitGuess - 4 ? inWin[inWin.length - (limitGuess - 4)].t + 30000 : 0;
-      const secs = Math.min(20, Math.max(e.retryAfter || 2, Math.ceil((freeAt - Date.now()) / 1000)));
+    const shortWait = !e.search || (searchBlockedUntil - Date.now()) <= 25000;
+    if (e.status === 429 && shortWait && !extra.retry && (e.retryAfter || 0) <= 20) {
+      const secs = Math.min(20, Math.max(2, e.search ? Math.ceil((searchBlockedUntil - Date.now()) / 1000) : (e.retryAfter || 3)));
       addMessage('sofia', `Spotify me pidió esperar ${secs} segundos. Lo intento sola en cuanto pase, no hagas nada.`);
       retryTimer = setTimeout(() => { retryTimer = null; handleRequest(request, extra); }, secs * 1000 + 300);
       return;
@@ -1438,6 +1552,7 @@ async function handleRequest(text, retryOf) {
 
 function friendlyError(e) {
   if (e.message === 'NO_LOGIN') return 'Necesito que me conectes a Spotify (Ajustes ⚙︎).';
+  if (e.message === 'SEARCH_BLOCKED' || (e.status === 429 && e.search)) return `Spotify le bloqueó a tu app las búsquedas por un rato${searchBlocked() ? ` (unos ${Math.max(1, Math.ceil((searchBlockedUntil - Date.now()) / 60000))} min)` : ''}, por lo mucho que buscaban las versiones viejas. Mientras tanto sí funciona: "Mis gustos", "Lo nuevo" y artistas que ya escuchas (por ejemplo "pon Natanael Cano").`;
   if (e.message === 'NO_DEVICE') return 'Spotify está cerrado. Ábrelo, dale play a cualquier canción y vuelve a pedírmelo: arranca al instante.';
   if (e.status === 403 && /restriction/i.test(e.message)) return 'Spotify no dejó cambiar la música en este momento. Abre Spotify, dale play a algo y vuelve a pedírmelo.';
   if (e.status === 429) return `Spotify me pidió una pausa${e.retryAfter ? ` de ${Math.ceil(e.retryAfter)} segundos` : ''}. Vuelve a pedírmelo en un momento.`;
@@ -1498,7 +1613,7 @@ async function refreshNowPlaying(force) {
   try {
     const r = await sp('/me/player');
     const item = r && r.item;
-    if (!item) { current = null; $('npTitle').textContent = 'Nada sonando'; $('npArtist').textContent = 'Abre Spotify y pídele algo a SOFIA'; $('npArt').removeAttribute('src'); return; }
+    if (!item) { current = null; $('npTitle').textContent = 'Nada sonando'; $('npArtist').textContent = 'Abre Spotify y pídele algo a Natalia'; $('npArt').removeAttribute('src'); return; }
     current = { uri: item.uri, id: item.id, artistIds: (item.artists || []).map((a) => a.id), artistNames: (item.artists || []).map((a) => a.name), label: `${(item.artists || []).map((a) => a.name).join(', ')} - ${item.name}`, playing: r.is_playing };
     $('npTitle').textContent = item.name;
     $('npArtist').textContent = (item.artists || []).map((a) => a.name).join(', ');
@@ -1554,7 +1669,7 @@ function setupSettings() {
   $('btnShowCode').onclick = () => {
     const t = store.get('token', null);
     $('inTransfer').value = t && t.refresh ? t.refresh : '';
-    addMessage('sofia', t ? 'Ese es tu código de conexión. Cópialo y pégalo en Ajustes de SOFIA en la otra ventana.' : 'Aún no hay conexión con Spotify en esta ventana.');
+    addMessage('sofia', t ? 'Ese es tu código de conexión. Cópialo y pégalo en Ajustes de Natalia en la otra ventana.' : 'Aún no hay conexión con Spotify en esta ventana.');
   };
   $('btnUseCode').onclick = async () => {
     const code = $('inTransfer').value.trim();
@@ -1570,17 +1685,18 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v10 · 18 nov';
+const VERSION = 'v12 · 18 nov';
 
-// Modo diagnóstico: toca 5 veces el logo "S" y SOFIA muestra cada llamada que hizo a Spotify.
+// Modo diagnóstico: toca 5 veces el logo "N" y Natalia muestra cada llamada que hizo a Spotify.
 function showDiagnostics() {
   const last = apiLog.slice(-40);
   const n429 = apiLog.filter((x) => x.s === 429 && x.t > Date.now() - 600000).length;
   const hhmmss = (t) => new Date(t).toLocaleTimeString('es', { hour12: false });
-  const text = `Diagnóstico SOFIA ${VERSION}\n` +
+  const text = `Diagnóstico Natalia ${VERSION}\n` +
     `Llamadas a Spotify: ${callsSince(30000)} en 30 s · ${callsSince(60000)} en 1 min · ${callsSince(600000)} en 10 min\n` +
-    `Pausas pedidas por Spotify (429) en 10 min: ${n429}${pausedUntil > Date.now() ? ` · en pausa ${Math.ceil((pausedUntil - Date.now()) / 1000)} s más` : ''}\n\n` +
-    last.map((x) => `${hhmmss(x.t)} ${x.s} ${x.m} ${x.p}${x.ra ? ' espera ' + x.ra + 's' : ''} ${x.ms}ms ${x.v && x.v !== VERSION ? '(' + x.v + ')' : ''}`).join('\n');
+    `Pausas pedidas por Spotify (429) en 10 min: ${n429}${pausedUntil > Date.now() ? ` · en pausa ${Math.ceil((pausedUntil - Date.now()) / 1000)} s más` : ''}\n` +
+    `Búsquedas: ${searchBlocked() ? `bloqueadas por Spotify ${Math.ceil((searchBlockedUntil - Date.now()) / 60000)} min más (uso otros caminos)` : 'funcionando'}\n\n` +
+    last.map((x) => `${hhmmss(x.t)} ${x.s}${x.r ? ' ' + x.r : ''} ${x.m} ${x.p}${x.ra ? ' espera ' + x.ra + 's' : ''} ${x.ms}ms ${x.v && x.v !== VERSION ? '(' + x.v + ')' : ''}`).join('\n');
   const b = addMessage('sofia', text);
   b.style.fontSize = '12px';
   const copy = document.createElement('button');
@@ -1612,7 +1728,7 @@ async function init() {
   if (!s.clientId || !store.get('token', null)) {
     fillSetup();
     showSetup(true);
-    addMessage('sofia', `¡Hola! Soy SOFIA, tu DJ. Para empezar, pega tu Client ID de Spotify, toca Guardar y luego "Conectar con Spotify".\n\nEn Spotify for Developers, esta debe ser la Redirect URI:\n${REDIRECT_URI}`);
+    addMessage('sofia', s.clientId ? '¡Hola! Soy Natalia, tu DJ. Toca "Conectar con Spotify" y listo.' : `¡Hola! Soy Natalia, tu DJ. Para empezar, pega tu Client ID de Spotify, toca Guardar y luego "Conectar con Spotify".\n\nEn Spotify for Developers, esta debe ser la Redirect URI:\n${REDIRECT_URI}`);
     return;
   }
   addMessage('sofia', '¡Hola! Abre Spotify y pídeme lo que quieras: "pon corridos", "pon Natanael Cano", "un género nuevo", "lo que se escucha en Puerto Rico", "organiza mis me gusta por géneros"…');
