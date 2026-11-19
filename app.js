@@ -299,7 +299,7 @@ function simplify(t) {
 const labelOf = (t) => `${t.artists.join(', ')} - ${t.name}`;
 
 // ---------- Intérprete propio (instantáneo, sin IA) ----------
-const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9& ]/g, ' ').replace(/\s+/g, ' ').trim();
+const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9& ]/g, ' ').replace(/(.)\1{2,}/g, '$1').replace(/\s+/g, ' ').trim();
 
 // Géneros que entiende Natalia. "genres" son los nombres que usa Spotify (el primero es el principal),
 // "fam" agrupa géneros parecidos y "pl" es el nombre de la playlist cuando organiza tus Me gusta.
@@ -420,6 +420,24 @@ const COMMANDS = [
   { re: /^(me gusta esta|me encanta esta|guardala|guarda esta|me gusto|me encanto)$/, run: () => rate(true), say: '' },
   { re: /^(no me gusta|no me gusta esta|quita esta|quitala|esta no|no me gusto)$/, run: () => rate(false), say: '' },
 ];
+// Errores de ortografía comunes -> la palabra correcta (para entender "kiero escucar bad bunny").
+const TYPO_FIX = [
+  [/\b(kiero|quiro|qiero|quero|kero|quieroo)\b/g, 'quiero'],
+  [/\b(escucar|escuchr|ecuchar|eskuchar|escuhar|escuchra|escuchat)\b/g, 'escuchar'],
+  [/\b(ponm|pnme|ponmee|ponem|ponmelo)\b/g, 'ponme'],
+  [/\b(recomendame|recomienadme|recomiedame|rekomiendame|recomiendam)\b/g, 'recomiendame'],
+  [/\b(hoal|ola|hla)\b/g, 'hola'],
+  [/\b(trise|tiste|tristee)\b/g, 'triste'],
+  [/\b(cancon|cacion|cansion|canscion|canciom)(es)?\b/g, 'cancion'],
+  [/\b(musca|musia|musika|muisca)\b/g, 'musica'],
+  [/\b(generos?) (nuebo|nuevp|nuvo)\b/g, 'genero nuevo'],
+  [/\b(nuebo|nuebos|nuvo|nuevp)\b/g, 'nuevo'],
+  [/\b(biejo|viejp|vieho)\b/g, 'viejo'],
+  [/\b(estou|etoy|estpy)\b/g, 'estoy'],
+  [/\b(grasias|gracas|grcias)\b/g, 'gracias'],
+];
+const fixTypos = (t) => TYPO_FIX.reduce((x, [rx, to]) => x.replace(rx, to), t);
+
 const FILLER = /\b(parce|parcero|parcera|mano|bro|llave|pana|pa|socio|hermano|rolas?|rolitas?|temazos?|temitas?|cancioncitas?|chimba|bacan[oa]s?|melo|ome|pues|vea|mijo|mija|nea|pero|sean|sea|casi|nadie|haya|hayan|escuchado|conocido|gente|poca|pocos|porfis|plis|please|sofia|sofi|ve|oye|hola|por favor|porfa|ponme|pon|ponga|pongas|reproduce|reproducir|quiero|quisiera|escuchar|oir|un|una|unos|unas|tema|temas|cancion|canciones|musica|de|del|la|el|los|las|algo|me|mi|mis|que|y|en|con|a|al|hoy|ahora|solo|puro|pura|puros|full|mas|otra|otras|otro|otros|bien|tipo|artistas?|parecid[oa]s?|similares?|estilo|como|recomiendame|recomienda|recomendar|dame|music|gente|esta|estan|estos|dias|escuchando|escucha|suena|sonando|pais)\b/g;
 const STOP_STEM = /^(moda|nuev|tendenc|recient|estren|actual|momento|pegand|viral|lanzamient|viej|antigu|clasic|descubr|sorprend|nunca|conozc|escuchad|distint|genero|gust|favorit|relaj|tranquil|dormir|descans|motiv|energ|entren|ejercic|fiesta|rumba|prend|parche|parecid|similar|estilo|recomiend|ingles|espanol|siempre|sesion|playlist|ponme|sofia|gimnas|concentr|estudi|semana|escuch|oig)/;
 const STOP_EXACT = new Set(['pon', 'no', 'nada', 'todo', 'esa', 'eso', 'este', 'lo', 'le', 'se', 'su', 'sus', 'para', 'haya', 'antes', 'old', 'school', 'dj', 'lista', 'calma', 'calmada', 'suave', 'chill', 'gym', 'activa', 'activo', 'activarme', 'totalmente', 'diferente', 'gym', 'pesas', 'correr', 'animo', 'top', 'he', 'ha', 'has', 'yo', 'ya', 'menos', 'rarezas', 'joyitas', 'ocultas', 'populares', 'popular', 'famosas', 'famosos', 'exitos', 'hits', 'mejores', 'sonadas', 'conocidas', 'joyas', 'joyita', 'joyitas', 'unas', 'bueno', 'buenas', 'buenos', 'chimbas', 'duro', 'durisimo', 'brutal', 'es', 'son', 'era', 'cantante', 'cantantes', 'artista', 'favorita', 'favorito', 'favoritas', 'favoritos', 'encanta', 'fascina', 'amo', 'mata', 'rompe', 'mucho', 'mejor', 'banda', 'grupo']);
@@ -443,7 +461,7 @@ function cleanPart(p) {
 // El género solo cuenta si la palabra termina ahí ("corridos belicones" no es "corridos belico" + "nes").
 const ALIAS_RX = new Map(GENRE_ALIASES.map((g) => [g, new RegExp('(?:' + g.re.source + ')(?![a-z])')]));
 function interpret(text) {
-  const t = norm(text);
+  const t = fixTypos(norm(text));
   let genre = null;
   let rest = t;
   for (const g of GENRE_ALIASES) {
@@ -528,7 +546,9 @@ async function searchTracks(q, offset = 0, market) {
 // Artistas que Natalia ya conoce (con su id de Spotify): de tus gustos, tus favoritos y todo lo ya buscado.
 function artistIndex() {
   const idx = {};
-  const add = (name, id) => { if (name && id && !idx[norm(name)]) idx[norm(name)] = { id, name }; };
+  const add = (name, id, shown) => { if (name && id && !idx[norm(name)]) idx[norm(name)] = { id, name: shown || name }; };
+  catalogArtists().forEach((c) => add(c.name, c.id));
+  Object.entries(CATALOG_ALIASES).forEach(([al, name]) => { const c = catalogArtists().find((x) => x.name === name); if (c) add(name === c.name ? al : al, c.id, c.name); });
   const profile = store.get('profile2', null);
   if (profile) {
     profile.artists.forEach((a) => add(a.name, a.id));
@@ -545,17 +565,17 @@ function knownArtist(name) {
   if (idx[n]) return idx[n];
   let best = null; let bestSim = 0;
   Object.entries(idx).forEach(([k, v]) => { const sim = similarity(k, n); if (sim > bestSim) { bestSim = sim; best = v; } });
-  return bestSim >= 0.8 ? best : null;
+  return bestSim >= (n.length >= 7 ? 0.75 : 0.82) ? best : null;
 }
 
 // Canciones de un artista SIN usar la búsqueda: sus álbumes (otro cupo de Spotify).
 // years: [desde, hasta] para quedarme solo con álbumes de esos años; pages: cuántas páginas de álbumes leer.
-async function artistTracksById(a, { deep, years, pages = 1, picks = 2 } = {}) {
+async function artistTracksById(a, { deep, years, pages = 1, picks = 2, groups = 'album,single' } = {}) {
   const pgs = await Promise.all(Array.from({ length: pages }, async (_, pg) => {
-    const key = 'al:' + a.id + (pg ? ':' + pg : '');
+    const key = 'al:' + a.id + (pg ? ':' + pg : '') + (groups === 'album,single' ? '' : ':' + groups);
     let al = cacheGet('b', key, 7 * 24 * 3600 * 1000);
     if (!al) {
-      const r = await sp(`/artists/${a.id}/albums`, { query: { include_groups: 'album,single', limit: 10, ...(pg ? { offset: pg * 10 } : {}) } });
+      const r = await sp(`/artists/${a.id}/albums`, { query: { include_groups: groups, limit: 10, ...(pg ? { offset: pg * 10 } : {}) } });
       al = ((r && r.items) || []).filter(Boolean).map((x) => ({ id: x.id, type: x.album_type, date: x.release_date || '', img: ((x.images || [])[x.images.length - 1] || {}).url || '' }));
       cachePut('b', key, al);
     }
@@ -1042,9 +1062,11 @@ async function artistSession(artist, mode, profile) {
     : [[`artist:"${artist.name}"`, 10]];
   const genreQs = al && !onlyHimEarly && !mode.similar ? [[`genre:"${al.genres[0]}"${yf}`, rnd(2) * 10]] : al && mode.similar ? [[`genre:"${al.genres[0]}"${yf}`, 0], [`genre:"${al.genres[0]}"${yf}`, 10]] : [];
   let firstPage = mode.deep || mode.fresh || mode.more ? [] : (artist.tracks || []);
+  // Si ya conozco su ID (catálogo, tus gustos o una búsqueda anterior) no busco: uso sus álbumes (3 llamadas, no una ráfaga).
+  const viaAlbums = !(artist.tracks || []).length;
   const [lists, albumTracks] = await Promise.all([
-    gather([...ownQs, ...genreQs], undefined, firstPage.length || !searchBlocked() ? 0 : 1),
-    firstPage.length >= 8 && !searchBlocked() ? Promise.resolve([]) : artistTracksById(artist, { deep: mode.deep || mode.more }).catch(() => []),
+    viaAlbums ? Promise.resolve([]) : gather([...ownQs, ...genreQs], undefined, firstPage.length || !searchBlocked() ? 0 : 1),
+    firstPage.length >= 8 && !searchBlocked() && !viaAlbums ? Promise.resolve([]) : artistTracksById(artist, { deep: mode.deep || mode.more, picks: viaAlbums && budgetLeft() >= 8 ? 3 : 2 }).catch((e) => { if (e && e.status === 429 && viaAlbums) throw e; return []; }),
   ]);
   firstPage = [...firstPage, ...albumTracks];
   let own = [...firstPage, ...lists.slice(0, ownQs.length).flat(), ...(mode.fresh ? [] : cachedFor(`artist:"${artist.name}"|`))].filter((t) => t.artistIds.includes(artist.id));
@@ -1138,8 +1160,37 @@ const GLOBAL_HITS = [
   ['2XU0oxnq2qxCpomAAuJY8K', 'Dance Monkey', 'Tones And I'],
 ].map(([id, name, artist]) => ({ uri: 'spotify:track:' + id, id, name, artistIds: [], artists: [artist], year: 0, img: '' }));
 
+const MORE_ARTISTS = [
+  AR('Bad Bunny', '4q3ewBCX7sLwd24euuV69X'), AR('De La Rose', '54seKvtsZauR1iauN0ptpo'), AR('Karol G', '790FomKkXshlbRYZFtlgla'),
+  AR('Peso Pluma', '12GqGscKJx3aE4t07u7eVZ'), AR('Natanael Cano', '0elWFr7TW8piilVRYJUe4P'), AR('Eslabon Armado', '0XeEobZplHxzM9QzFQWLiR'),
+  AR('Myke Towers', '7iK8PXO48WeuP03g8YR51W'), AR('Rauw Alejandro', '1mcTU81TzQhprhouKaTkpq'), AR('J Balvin', '1vyhD5VmyZ7KMfW5gqLgo5'),
+  AR('Maluma', '1r4hJ1h58CWwUQe3MxPuau'), AR('Ozuna', '1i8SpTcr7yvPOmcqrbnVXY'), AR('Daddy Yankee', '4VMYDCV2IEDYJArk749S6m'),
+  AR('Jhayco', '6nVcHLIgY5pE2YCl8ubca1'), AR('Eladio Carrión', '5XJDexmWFLWOkjOEjOVX3e'), AR('Eminem', '7dGJo4pcD2V6oG8kP0tJRR'),
+  AR('Shakira', '0EmeFodog0BfCgMzAIvKQp'), AR('Arcángel', '4SsVbpTthjScTS7U2hmr1X'), AR('Nicky Jam', '1SupJlEpv7RS2tPNRaHViT'),
+  AR('Quevedo', '52iwsT98xCoGgiGntTiR7K'), AR('Tito Double P', '5eumcnUkdmGvkvcsx1WFNG'), AR('Omar Courtz', '3E12tRURRvPfHz0hAMCFYc'),
+  AR('Yan Block', '6TKygPpVT29oGUogu4J9Ec'), AR('J Abdiel', '17SY5q1CMOZJBRuPcKWwPI'), AR('iZaak', '4s6Xg38sbqh4xpf4OqhVUK'),
+  AR('Jay Wheeler', '2cPqdH7XMvwaBJEVjheH8g'), AR('Ñengo Flow', '12vb80Km0Ew53ABfJOepVz'), AR('Hades66', '4CQdcx66F116k2db2Y0rjE'),
+  AR('Grupo Frontera', '6XkjpgcEsYab502Vr1bBeW'),
+];
+// Nombres cortos o mal escritos más comunes -> nombre del catálogo.
+const CATALOG_ALIASES = { 'la rose': 'De La Rose', 'delarose': 'De La Rose', 'anuel': 'Anuel AA', 'anuel a a': 'Anuel AA', 'benito': 'Bad Bunny', 'conejo malo': 'Bad Bunny',
+  'rauw': 'Rauw Alejandro', 'balvin': 'J Balvin', 'karol': 'Karol G', 'peso': 'Peso Pluma', 'natanael': 'Natanael Cano', 'eslabon': 'Eslabon Armado', 'luis r': 'Luis R Conriquez', 'fuerza': 'Fuerza Regida' };
+let catalogCache = null;
+function catalogArtists() {
+  if (!catalogCache) {
+    const seen = new Map();
+    [...Object.values(PRESET_ARTISTS), ...US_RAP_POOL, ...MORE_ARTISTS].forEach((a) => { if (!seen.has(a.id)) seen.set(a.id, a); });
+    catalogCache = [...seen.values()];
+  }
+  return catalogCache;
+}
+const byName = (n) => catalogArtists().find((a) => a.name === n);
+
 const PRESETS = [
   { id: 'larose', re: /\bla rose\b.*\bsimilares\b/ },
+  { id: 'bbviejo', re: /bad bunny.*(flow viejo|viejo|antiguo)/ },
+  { id: 'bbnuevo', re: /bad bunny.*(flow nuevo|nuevo|actual)/ },
+  { id: 'anuel', re: /^pon de anuel aa$/ },
   { id: 'corridos', re: /corridos de los dos de tamaulipas/ },
   { id: 'drake', re: /\bdrake\b.*\bsimilares\b/ },
   { id: 'usrap', re: /artistas americanos/ },
@@ -1167,13 +1218,29 @@ async function presetSession(p, profile) {
     return { tracks: tracks.length >= 8 ? tracks : shuffle(GLOBAL_HITS).slice(0, count), key: '', label: 'éxitos globales', intro: 'Los éxitos más famosos del mundo y de Estados Unidos, de siempre: Uptown Funk, Happy, Beautiful Girls y más.' };
   }
   if (p.id === 'larose') {
-    let rose = knownArtist('La Rose');
-    if (!rose && !searchBlocked()) { const f = await findArtist('La Rose').catch(() => null); if (f && f.id && (f.exact || f.sim >= 0.8)) rose = f; }
-    const similar = shuffle([A.blessd, A.ryan, A.feid, A.beele, A.anuel]).slice(0, rose ? 2 : 3);
-    const specs = [...(rose ? [{ artist: rose, take: 10 }] : []), ...similar.map((a) => ({ artist: a, take: 7 }))];
-    const groups = await presetMix(specs, profile);
+    const rose = byName('De La Rose');
+    const similar = shuffle(['Omar Courtz', 'Ryan Castro', 'Jay Wheeler', 'Yan Block', 'J Abdiel', 'Ñengo Flow', 'Daddy Yankee'].map(byName)).slice(0, 2);
+    const groups = await presetMix([{ artist: rose, take: 12 }, ...similar.map((a) => ({ artist: a, take: 7 }))], profile);
     const tracks = arrange(groups, count, avoid);
-    return { tracks, key: 'reguetón', label: 'La Rose y similares', intro: `${rose ? 'La Rose' : 'Reguetón parecido a La Rose'} y artistas parecidos (${similar.map((a) => a.name).join(', ')}), todo reguetón.` };
+    return { tracks, key: 'reguetón', label: 'De La Rose y similares', intro: `De La Rose y artistas con los que suena (${similar.map((a) => a.name).join(' y ')}), todo urbano.` };
+  }
+  if (p.id === 'bbviejo' || p.id === 'bbnuevo') {
+    const old = p.id === 'bbviejo';
+    const bb = byName('Bad Bunny');
+    const years = old ? [2016, 2020] : [2022, 2026];
+    const picks = budgetLeft() >= 10 ? 3 : 2;
+    let list = await artistTracksById(bb, { years, groups: 'album', picks }).catch((e) => { if (e && e.status === 429) throw e; return []; });
+    if (list.length < 8) list = list.concat(await artistTracksById(bb, { groups: 'album', picks: 2 }).catch(() => []));
+    const tracks = arrange([shuffle(list)], count, avoid);
+    return { tracks, key: 'reguetón', label: old ? 'Bad Bunny flow viejo' : 'Bad Bunny flow nuevo',
+      intro: old ? 'Bad Bunny de la época vieja (2016 a 2020): X100PRE, YHLQMDLG, El Último Tour del Mundo.' : 'Bad Bunny de la época nueva (2022 en adelante).' };
+  }
+  if (p.id === 'anuel') {
+    const an = byName('Anuel AA');
+    const picks = budgetLeft() >= 10 ? 3 : 2;
+    const list = await artistTracksById(an, { deep: true, picks, groups: 'album' }).catch((e) => { if (e && e.status === 429) throw e; return []; });
+    const tracks = arrange([shuffle(list)], count, avoid);
+    return { tracks, key: 'reguetón', label: 'Anuel AA', intro: 'Puro Anuel AA.' };
   }
   if (p.id === 'corridos') {
     const pool = shuffle([
@@ -1250,15 +1317,16 @@ async function buildSession(text, extra) {
     if (uniq.length >= 2) {
       const per = Math.ceil(count / uniq.length) + 2;
       const deepish = mode.deep || mode.more;
-      const offsOf = (ar) => (deepish ? [20, 30] : [...((ar.tracks || []).length ? [] : [0]), ...(per > 10 ? [10] : [])]);
-      const qs = uniq.map((ar) => offsOf(ar).map((o) => [`artist:"${ar.name}"`, o]));
-      const flatLists = await gather(qs.flat(), undefined, uniq.length);
+      // Los que conozco por ID: sus álbumes. Los que vienen de una búsqueda: como antes.
+      const viaSearch = (ar) => (ar.tracks || []).length > 0 && !searchBlocked();
+      const offsOf = (ar) => (deepish ? [20, 30] : [...(per > 10 ? [10] : [])]);
+      const qs = uniq.map((ar) => (viaSearch(ar) ? offsOf(ar).map((o) => [`artist:"${ar.name}"`, o]) : []));
+      const flatLists = qs.flat().length ? await gather(qs.flat(), undefined, 0) : [];
       let k = 0;
       const groups = await Promise.all(uniq.map(async (ar, i) => {
         const mine = flatLists.slice(k, k + qs[i].length).flat(); k += qs[i].length;
         let g = [...(deepish ? [] : (ar.tracks || [])), ...mine].filter((t) => t.artistIds.includes(ar.id));
-        // Sin búsqueda disponible: sus álbumes (otro camino de Spotify).
-        if (g.length < 6) g = g.concat(shuffle(await artistTracksById(ar, { deep: deepish }).catch(() => [])));
+        if (g.length < 6) g = g.concat(shuffle(await artistTracksById(ar, { deep: deepish, picks: budgetLeft() >= 8 ? 2 : 1 }).catch((e) => { if (e && e.status === 429 && !g.length) throw e; return []; })));
         return g.slice(0, per);
       }));
       const tracks = arrange(groups, count, avoidFor(profile, false, mode.more ? 200 : 0));
@@ -1581,6 +1649,85 @@ async function rate(love) {
 let busy = false;
 let lastSpokenByVoice = false;
 
+
+// ---------- Conversación: Natalia habla, recomienda y entiende sin salir a buscar a Spotify ----------
+const CHAT = {
+  greet: /^(hola|holi|hey|ey|buenas|buenos dias|buenas tardes|buenas noches|que mas|q mas|que tal|como estas|como vas|como te va|que hay|que haces|saludos|hello|hi)\b/,
+  talk: /\b(hablar|conversar|platicar|charlar|hablemos|conversemos)\b/,
+  thanks: /^(gracias|muchas gracias|mil gracias|ok gracias|vale gracias|genial|perfecto|chevere|bacano|buenisimo|excelente|listo|vale|ok|okey|dale)( \w+)?$/,
+  about: /\b(quien|que) (eres|sos)\b|\bque (puedes|sabes|haces)\b|\bayuda\b|\bcomo (funcionas|te uso)\b|\bpara que sirves\b/,
+  reco: /recomiend|recomienda|sugier|sugiere|aconsej|\bque (escucho|pongo|me pones|me pondrias|puedo escuchar|hay para escuchar)\b|no se que (escuchar|poner|pedir)|\bideas?\b|sorprend|\balgo (nuevo|bueno|chevere|diferente|para escuchar)$/,
+  askArtist: /^(conoces|conoce|sabes quien es|quien es|que opinas de|que tal es|has escuchado a|te gusta|que sabes de)\s+(.+)$/,
+  strongPlay: /\b(pon|ponme|pone|ponle|ponga|dame|reproduce|reproducir|toca|tocame|play|mezcla|armame|echame)\b|\b(quiero|quisiera|necesito|me provoca|se me antoja)( (escuchar|oir|algo de|musica de))\b/,
+  mood: [
+    { re: /triste|deprim|llor|desamor|despecho|ansios|estres|me siento (mal|solo|sola)/, say: 'Uy, qué pena. A veces ayuda música tranquila, o algo que te acompañe. Dime si prefieres desahogarte o distraerte.', opts: [['Algo relajante', 'Relajante'], ['Baladas', 'Pon baladas'], ['Mis gustos', 'Mis gustos']] },
+    { re: /feliz|content|animad|fiesta|rumba|perre|parche|emociona|celebr/, say: '¡Qué bueno! Para esa energía te propongo esto:', opts: [['Éxitos globales', 'Los éxitos más famosos del mundo y de Estados Unidos'], ['De La Rose y similares', 'Pon de La Rose y similares'], ['Mis gustos', 'Mis gustos']] },
+    { re: /gym|gimnasio|entren|ejercicio|pesas|correr/, say: '¡A darle! Para entrenar te sirve esto:', opts: [['Motivación', 'Motivación'], ['Drake y similares', 'Pon de Drake y similares'], ['Artistas americanos', 'Descubrir artistas americanos de trap y rap']] },
+    { re: /estudi|trabaj|concentr|dormir|descansar|cansad|sueno|tarea/, say: 'Para concentrarte o descansar va bien algo suave, sin letra que distraiga mucho.', opts: [['Algo relajante', 'Relajante'], ['Baladas', 'Pon baladas']] },
+    { re: /enamorad|romantic|amor|novi[oa]|besar/, say: 'Qué lindo. Para ese momento te propongo algo romántico.', opts: [['Baladas', 'Pon baladas'], ['Algo relajante', 'Relajante']] },
+    { re: /manej|viaje|carretera|camino|trafico/, say: 'Para el camino va bien algo que no te canse y que conozcas.', opts: [['Éxitos globales', 'Los éxitos más famosos del mundo y de Estados Unidos'], ['Mis gustos', 'Mis gustos']] },
+    { re: /aburrid|nada que hacer|monoton/, say: 'Entonces vamos a probar algo distinto.', opts: [['Género nuevo', 'Un género nuevo que no escuche'], ['Artistas americanos', 'Descubrir artistas americanos de trap y rap']] },
+  ],
+};
+
+// Opciones de recomendación a partir de lo que escuchas (sin llamar a Spotify).
+function recoOptions(profile) {
+  const opts = [];
+  const arts = (profile && profile.artists || []).slice(0, 4).map((a) => a.name);
+  if (arts[0]) opts.push([`Más de ${arts[0]}`, `Pon ${arts[0]}`]);
+  if (arts[1]) opts.push([`Más de ${arts[1]}`, `Pon ${arts[1]}`]);
+  const taste = profile ? tasteByGenre(profile) : {};
+  const top = Object.keys(taste).sort((a, b) => taste[b] - taste[a])[0];
+  if (top) opts.push([`Más ${top}`, `Pon ${top}`]);
+  opts.push(shuffle([['Un género nuevo', 'Un género nuevo que no escuche'], ['Artistas americanos nuevos', 'Descubrir artistas americanos de trap y rap'], ['Éxitos globales', 'Los éxitos más famosos del mundo y de Estados Unidos'], ['Bad Bunny flow nuevo', 'Pon Bad Bunny flow nuevo']])[0]);
+  return opts.slice(0, 4);
+}
+
+// Devuelve { say, opts } si el mensaje es conversación (no un pedido de música), si no null.
+function chatReply(t, profile) {
+  if (!t || PRESETS.some((p) => p.re.test(t))) return null;
+  const words = t.split(' ').length;
+  // Pedidos claros de música ("pon...", "quiero escuchar X") siguen su camino... salvo que no digan qué.
+  const play = CHAT.strongPlay.test(t);
+  const rest = t.replace(CHAT.strongPlay, ' ').replace(/\b(escuchar|oir|musica|algo|de|un|una|unos|unas|por favor|porfa|cancion|canciones|tema|temas|rolas?|bueno|buena|nuevo|chevere|cualquier cosa|lo que sea)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  if (play && rest) return null;
+  if (play && !rest) return { say: 'Claro. ¿De qué te antoja? Te propongo estas opciones, o dime un artista o género:', opts: recoOptions(profile) };
+  if (CHAT.about.test(t)) return { say: 'Soy Natalia, tu DJ. Hablo contigo y te pongo música en tu Spotify: dime un artista, un género o cómo te sientes ("estoy triste", "voy al gym"). También puedes pedir varios a la vez, como "bad bunny y anuel".', opts: recoOptions(profile).slice(0, 3) };
+  const ask = t.match(CHAT.askArtist);
+  if (ask) {
+    const raw = ask[2].trim();
+    const k = knownArtist(raw);
+    const nm = k ? k.name : raw.replace(/\b\w/g, (c) => c.toUpperCase());
+    const mine = profile && k && profile.artists.some((a) => a.id === k.id);
+    return { say: `${nm}${mine ? ': de lo que más escuchas' : ''}. ¿Te pongo algo?`, opts: [[`Pon ${nm}`, `Pon ${nm}`], [`Parecidos a ${nm}`, `Pon parecidos a ${nm}`], [`Lo menos conocido`, `Pon lo menos conocido de ${nm}`]] };
+  }
+  const STATE = /\b(estoy|ando|me siento|me da|tengo|voy (a|al|a la)|vamos (a|al)|hoy|me toca|ganas de|quiero (llorar|bailar|salir|rumbear)|necesito (calma|animo|energia))\b/;
+  if (STATE.test(t)) for (const m of CHAT.mood) if (m.re.test(t) && words <= 14) return { say: m.say, opts: m.opts };
+  if (CHAT.reco.test(t) && words <= 12) {
+    const q = interpret(t).artistQuery;
+    if (q && knownArtist(q)) { const nm = knownArtist(q).name; return { say: `De ${nm} puedo ponerte esto:`, opts: [[`Pon ${nm}`, `Pon ${nm}`], [`Parecidos a ${nm}`, `Pon parecidos a ${nm}`], ['Lo menos conocido', `Pon lo menos conocido de ${nm}`]] }; }
+    const arts = (profile && profile.artists || []).slice(0, 2).map((a) => a.name);
+    return { say: `${arts.length ? `Por lo que escuchas (${arts.join(', ')}), te propongo` : 'Te propongo'} esto, toca el que quieras:`, opts: recoOptions(profile) };
+  }
+  if ((CHAT.talk.test(t) && words <= 8) || (CHAT.greet.test(t) && words <= 4)) {
+    const hi = /^(hola|holi|hey|ey|buenas|hello|hi)/.test(t) ? '¡Hola! ' : '';
+    return { say: `${hi}¿Cómo estás? Cuéntame cómo te sientes o qué se te antoja, y te recomiendo. Si no sabes, estas opciones:`, opts: recoOptions(profile).slice(0, 3) };
+  }
+  if (CHAT.thanks.test(t) && words <= 3) return { say: '¡A ti! Si quieres algo más, solo dime.', opts: [] };
+  return null;
+}
+
+function sayWithOptions(text, opts) {
+  const b = addMessage('sofia', text);
+  pushHistory('sofia', text);
+  if (opts && opts.length) {
+    const actions = document.createElement('div'); actions.className = 'actions';
+    opts.forEach(([label, q]) => { const btn = document.createElement('button'); btn.textContent = label; btn.onclick = () => handleRequest(q); actions.appendChild(btn); });
+    b.appendChild(actions);
+  }
+  return b;
+}
+
 let retryTimer = null;
 let queuedText = null;
 async function handleRequest(text, retryOf) {
@@ -1592,7 +1739,7 @@ async function handleRequest(text, retryOf) {
   if (!store.get('token', null)) { showSetup(true); addMessage('error', 'Primero conéctame a tu Spotify con el botón verde.'); return; }
   busy = true;
   if (!retryOf) { addMessage('user', text); pushHistory('user', text); }
-  const t = norm(text).replace(/^(ve |oye )?(sofi|sofia|nati|natalia)\b ?/, '').replace(/ (por favor|porfa)$/, '').trim();
+  const t = fixTypos(norm(text)).replace(/^(ve |oye )?(sofi|sofia|nati|natalia)\b ?/, '').replace(/ (por favor|porfa)$/, '').trim();
   const cmd = COMMANDS.find((c) => c.re.test(t));
   if (cmd) {
     try { await cmd.run(); if (cmd.say) addMessage('sofia', cmd.say); setTimeout(refreshNowPlaying, 700); }
@@ -1603,6 +1750,11 @@ async function handleRequest(text, retryOf) {
     const b = addMessage('sofia', 'Voy a organizar tus Me gusta por género. Esto sí tarda un poco (es una sola vez)…');
     try { await organizeLiked(b); } catch (e) { addMessage('error', 'No pude terminar de organizar: ' + friendlyError(e)); }
     busy = false; return;
+  }
+  // Conversación: si no es un pedido de música, Natalia habla y recomienda sin llamar a Spotify.
+  {
+    const reply = chatReply(t, store.get('profile2', null));
+    if (reply) { sayWithOptions(reply.say, reply.opts); busy = false; return; }
   }
   // Memoria de la conversación: "pon más", "otras", "más nuevas"… siguen con lo último que pediste.
   let request = text;
@@ -1815,7 +1967,7 @@ function setupSettings() {
 }
 
 // ---------- Arranque ----------
-const VERSION = 'v14 · 18 nov';
+const VERSION = 'v15 · 19 nov';
 
 // Modo diagnóstico: toca 5 veces el logo "N" y Natalia muestra cada llamada que hizo a Spotify.
 function showDiagnostics() {
